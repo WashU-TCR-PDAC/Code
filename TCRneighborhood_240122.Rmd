@@ -1,0 +1,1673 @@
+---
+title: "220706_TCRNeighborhood_Figures"
+author: "Graham Hogg"
+date: '220706'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+
+setwd("/users/vikrampothuri/Documents/TCR_Graham")
+
+library(dplyr)
+library(data.table)
+library(ggplot2)
+library(forcats)
+library(parallel)
+library(stringr)
+library(reshape2)
+library(ggseqlogo)
+library(gridExtra)
+library(cowplot)
+library(ggpubr)
+library(survminer)
+library(survival)
+library(ggrepel)
+library(SingleCellExperiment)
+library(scran)
+library(scater)
+library(RColorBrewer)
+library(Matrix)
+library(igraph)
+
+OUTPUT_DIR <- "/Users/vikrampothuri/Documents/TCR_PDAC/Output"
+```
+
+## Generating Figures 
+
+# Step 1: Import a table from TCRdist3 and build single cell object with patient data
+
+```{r, TCR_Cohorts}
+#load in TCRdist3 table results from all tissue samples
+#format table results, convert from sparse to zero inflated
+TCR_Dist_EXP_Out <- read.table("/users/vikrampothuri/Documents/TCR_Graham/Inputs/TCRdist_exp_Matrix_Out.csv", sep = ",")
+TCR_Dist_EXP_Out <- data.frame(TCR_Dist_EXP_Out)
+TCR_Dist_EXP_Out[1,] <- gsub("-Tissue", "", TCR_Dist_EXP_Out[1,])
+colnames(TCR_Dist_EXP_Out) <- c(TCR_Dist_EXP_Out[1,])
+TCR_Dist_EXP_Out <- TCR_Dist_EXP_Out[-1,]
+TCR_Dist_EXP_Out[TCR_Dist_EXP_Out == ""] <- NA
+TCR_Dist_EXP_Out[] <- sapply(TCR_Dist_EXP_Out, function(x) {ifelse(is.na(x), 0, x)}, USE.NAMES = TRUE)
+
+#load in patient data
+pdata <- read.csv("/users/vikrampothuri/Documents/TCR_Graham/Inputs/WashU.Tissue.csv", sep = ",", fileEncoding = "UTF-8-BOM", na.strings="")
+
+#create numeric matrix 
+mtx <- sapply(TCR_Dist_EXP_Out, as.numeric)
+mtx <- as.matrix(mtx)
+
+#find cluster centroids that are only shared by one patient 
+mtx1 <- mtx
+mtx1 <- t(mtx1)
+mtx1 <- as.data.frame(mtx1)
+mtx1 <- mtx1 %>% dplyr::summarise_all(n_distinct)
+mtx1 <- as.vector(which(apply(mtx1, 2, function(r) any(r ==2 ))))
+
+#remove tcr neighborhoods that are not shared
+mtx <- mtx[-c(mtx1), ] 
+
+#normalize matrix by multiplying by 1x10^6 and taking the +1 log
+mtx_norm <- mtx*(1*10^6)
+mtx_norm <- log1p(mtx_norm)
+
+#add patient data to columns of single cell object
+coldata <- as.data.frame(colnames(mtx))
+coldata$Sample <- as.integer(coldata$`colnames(mtx)`)
+coldata <- full_join(coldata, pdata, by = c("Sample" = "Sample_Name"))
+rownames(coldata) <- coldata[,1]
+coldata <- coldata[,-1]
+
+#create singlecell object
+sce_TCRdist <- SingleCellExperiment(assays=list(counts = mtx, logcounts = mtx_norm),
+                colData= coldata, metadata=coldata)
+
+#determine sample variance and plot
+sce_var <- modelGeneVar(sce_TCRdist)
+
+# Visualizing the fit
+fit.var <- metadata(sce_var)
+
+########Supplementary Figure of sample variance
+pdf("/users/vikrampothuri/Documents/TCR_Graham/Figures/WashU_Tissue_TCR_Neighborhood_Variance.pdf", height = 4, width = 4)
+plot(fit.var$mean, fit.var$var, xlab="Mean of log-expression",
+     ylab="Variance of log-expression")
+curve(fit.var$trend(x), col="dodgerblue", add=TRUE, lwd=2)
+dev.off()
+########*
+
+#select highest variance samples with .25 fdr threshold
+sce_var.2 <- getTopHVGs(sce_var, fdr.threshold = .25)
+
+#determine 40 principle components with selected variable samples
+sce_TCRdist <- scater::runPCA(sce_TCRdist, exprs_values = "logcounts",  subset_row=sce_var.2, scale = TRUE, ncomponents = 40)
+
+#visualize variance explained by PCs using elbow plot, 
+#and determine number of PCs to use by elbow
+percent.var <- attr(reducedDim(sce_TCRdist), "percentVar")
+
+########Supplementary Figure of pc explained variance
+pdf("/users/vikrampothuri/Documents/TCR_Graham/Figures/WashU_Tissue_TCR_Neighborhood_Elbow.pdf", height = 4, width = 4)
+plot(percent.var, xlab="PC", ylab="Variance explained (%)")
+dev.off()
+########*
+
+#run UMAP using top 6 principle components
+set.seed(10)
+sce_TCRdist <- runUMAP(sce_TCRdist, dimred = "PCA", n_dimred = 6)
+
+#cluster samples using nearest neighbor graphs, setting k to 50, and using louvain algorithm
+clust <- buildKNNGraph(sce_TCRdist, use.dimred = "PCA", k = 50)
+clust <- igraph::cluster_louvain(clust)$membership
+colLabels(sce_TCRdist) <- factor(clust)
+
+sce_TCRdist@metadata$identity <- factor(clust)
+
+### read in single cell object file
+sce_TCRdist <- readRDS("/users/vikrampothuri/Documents/TCR_Graham/Inputs/220710_sce_TCRdist.rds")
+
+#plot clusters on UMAP
+mycolors <- c("#F8766D", "#00BFC4", "#7CAE00", "#C77CFF")
+
+dense <- plotReducedDim(sce_TCRdist, "UMAP", colour_by="label")
+
+######## main figure of UMAP with patients plotted by TCR repertoire
+pdf("/users/vikrampothuri/Documents/TCR_Graham/Figures/WashU_Tissue_TCR_Neighborhood_Cluster.pdf", height = 4, width = 5.5)
+ggplot(dense$data, aes(dense$data$X, dense$data$Y, group = dense$data$colour_by, 
+      color = dense$data$colour_by)) + stat_density_2d(geom = "polygon",
+      aes(alpha = ..level.., fill = dense$data$colour_by), bins = 6)+ 
+      theme_classic() + geom_point() + 
+      ggtitle("Unsupervised Clustering of Repertoire Cohort") +
+      xlab("UMAP_Y") + ylab("UMAP_X") + labs(fill = "Repertoire Cohort") + 
+      guides(color = FALSE, alpha = FALSE) + scale_color_manual(values = mycolors)+ scale_fill_manual(values = mycolors)
+dev.off()
+#######*
+
+#plot survival by cluster
+pdata <- data.frame(sce_TCRdist@metadata)
+
+fit <- survfit(Surv(time = pdata$Survival/30.4167, 
+                    event = pdata$Deceased) 
+                 ~ pdata$identity, data = pdata)
+#Original Plot
+fit_surv <- ggsurvplot(fit, data = pdata, risk.table = FALSE, 
+            surv.median.line = "hv", pval = TRUE, pval.method = TRUE, palette = mycolors)$plot
+
+#Formatted Plot
+fit_surv <- ggsurvplot(fit, data = pdata, risk.table = TRUE, risk.table.y.text= FALSE,risk.table.fontsize = 4 , risk.table.height = .3, break.time.by = 25,surv.median.line = "hv", pval = TRUE, pval.method = TRUE, palette = mycolors,axes.offset = FALSE, xlab = "Months")
+fit_surv$table <- fit_surv$table + theme(plot.title = element_text(hjust = 0.5))
+
+###### Main Figure Survival by Patient Cluster 
+#Deleted height = 4, width = 5.5
+pdf("/users/vikrampothuri/Documents/TCR_Graham/Figures/WashU_Tissue_TCR_Cluster_Survival.pdf")
+print(fit_surv)
+dev.off()
+######
+
+#Calculate Hazard Ratios
+surv<- Surv(time = pdata$Survival/30.4167,event = pdata$Deceased)
+#paste in from above after ~
+res.cox <- coxph(surv ~ pdata$identity, data = pdata)
+log_rank <- survdiff(surv ~ pdata$identity, data = pdata)
+zphtest<-cox.zph(res.cox, terms=FALSE)
+zphtest
+
+#plot survival by cluster of interest
+mycolors <- c("#7CAE00", "Black")
+
+pdata$identity_COI <- sapply(pdata$identity , function(x) {ifelse(x %in% "3", 3, "Pooled")})
+
+fit <- survfit(Surv(time = pdata$Survival/30.4167, event = pdata$Deceased) 
+                 ~ pdata$identity_COI, data = pdata)
+
+#Original Plot
+fit_surv <- ggsurvplot(fit, data = pdata, risk.table = FALSE, surv.median.line = "hv",
+                         pval = TRUE, pval.method = TRUE, palette = mycolors)$plot 
+
+#Formatted Plot
+fit_surv <- ggsurvplot(fit, data = pdata, risk.table = TRUE, risk.table.y.text= FALSE,risk.table.fontsize = 4 , risk.table.height = .3, break.time.by = 25,surv.median.line = "hv", pval = TRUE, pval.method = TRUE, palette = mycolors,axes.offset = FALSE, xlab = "Months")
+fit_surv$table <- fit_surv$table + theme(plot.title = element_text(hjust = 0.5))
+
+########Main Figure Plot survival by patient cluster 3
+pdf("/users/vikrampothuri/Documents/TCR_Graham/Figures/WashU_Tissue_TCR_COI_Survival.pdf", height = 4, width = 5.5)
+print(fit_surv)
+dev.off()
+########*
+
+#Calculate Hazard Ratios
+#Create temp date frame with switched levels
+temp_data <- mutate(pdata,
+                    identity_COI = factor(identity_COI, levels = c("Pooled","3")))
+surv<- Surv(time = temp_data$Survival/30.4167,event = temp_data$Deceased)
+#paste in from above after ~
+res.cox <- coxph(surv ~ temp_data$identity_COI, data = temp_data)
+summary(res.cox)
+log_rank <- survdiff(surv ~ temp_data$identity_COI, data = temp_data)
+zphtest<-cox.zph(res.cox, terms=FALSE)
+zphtest
+
+pdata_clean <- subset(pdata, !(is.na(True_Entropy)))
+
+mycolors <- c("#F8766D", "#00BFC4", "#7CAE00", "#C77CFF")
+
+###### Main Figure comparing True entropy between patient clusters
+my_comparisons <- list(c("1","2"),c("1","3"),c("1","4"),c("2","3"),c("2","4"),c("3","4"))
+pdf("/users/vikrampothuri/Documents/TCR_Graham/Figures/WashU_Tissue_TCR_Cluster_Entropy.pdf", height = 4, width = 5.5)
+print(ggplot(pdata_clean, aes_string(x = "identity", y = "True_Entropy", group = "identity", fill = "identity")) + geom_boxplot() +
+  geom_hline(yintercept = mean(pdata_clean$True_Entropy), linetype = 2) + 
+  stat_compare_means(method = "anova", label.y = 15)+        # Add global annova p-value
+  #stat_compare_means(label = "p.signif", method = "t.test", size = 8, comparisons = ) + 
+  ggtitle("True Entropy") + theme_classic() + scale_fill_manual(values= mycolors) +
+  theme(plot.title = element_text(hjust = 0.5), axis.title.x=element_blank(), axis.title.y=element_blank())) 
+dev.off()
+
+#######*
+
+#Pairwise comparisons for TCR diversity differences by cluster
+compare_means(True_Entropy~identity, method = "t.test", paired = FALSE, p.adjust.method = "bonferroni", data = pdata_clean)
+
+pdata_clean <- subset(pdata, !(is.na(fraction_productive_of_cells)))
+
+##### Main Figure comparing fraction productive T cells by patient cluster
+pdf("/users/vikrampothuri/Documents/TCR_Graham/Figures/WashU_Tissue_TCR_Cluster_T_Fraction.pdf", height = 4, width = 5.5)
+print(ggplot(pdata_clean, aes_string(x = "identity", y = "fraction_productive_of_cells", group = "identity", fill = "identity")) + geom_boxplot() +
+  geom_hline(yintercept = mean(pdata_clean$fraction_productive_of_cells), linetype = 2) + 
+  stat_compare_means(method = "anova", label.y = .4)+        # Add global annova p-value
+  stat_compare_means(label = "p.signif", method = "t.test", ref.group = ".all.", hide.ns = TRUE) + 
+  ggtitle("Estimated T-cell Fraction") + theme_classic() + scale_fill_manual(values= mycolors) +
+  theme(plot.title = element_text(hjust = 0.5), axis.title.x=element_blank(), axis.title.y=element_blank())) 
+dev.off()
+#######*
+
+#Calculating means and medians fraction t cells for each patient cluster
+summary(pdata_clean$fraction_productive_of_cells, useNA = "ifany")
+summary(pdata_clean$True_Entropy, useNA = "ifany")
+nrow(pdata_clean)
+Tcells_by_cluster <- pdata_clean %>% group_by(identity) %>%
+        summarise(
+          TrueE_mean = mean(True_Entropy),
+          TrueE_median = median(True_Entropy),
+          fraction_t_mean = mean(fraction_productive_of_cells),
+          fraction_t_median = median(fraction_productive_of_cells)
+        )
+
+pdata_clean <- subset(pdata, !(is.na(Age)))
+
+###### Supplementary Figure comparing patient age by patient cluster
+pdf("/users/vikrampothuri/Documents/TCR_Graham/Figures/WashU_Tissue_TCR_Cluster_Age.pdf", height = 4, width = 5.5)
+print(ggplot(pdata_clean, aes_string(x = "identity", y = "Age", group = "identity", fill = "identity")) + geom_boxplot() +
+  geom_hline(yintercept = mean(pdata_clean$Age), linetype = 2) + 
+  stat_compare_means(method = "anova", label.y = .4)+        # Add global annova p-value
+  stat_compare_means(label = "p.signif", method = "t.test", ref.group = ".all.", hide.ns = TRUE) + 
+  ggtitle("Age") + theme_classic() + scale_fill_manual(values= mycolors) +
+  theme(plot.title = element_text(hjust = 0.5), axis.title.x=element_blank(), axis.title.y=element_blank())) 
+dev.off()
+########*
+
+pdata_clean <- subset(pdata, !(is.na(Stage)))
+
+##### Supplementary Figure comparing tumor stage by patient cluster
+pdf("./Figures/WashU_Tissue_TCR_Cluster_Stage.pdf", height = 4, width = 5.5)
+ggplot(pdata_clean, aes(x=identity, fill = Stage)) + geom_bar(stat = "count", position = "fill") + theme_minimal() + 
+  scale_fill_brewer(palette = "Set3")
+dev.off()
+#####*
+
+# Chi square test for significant betweeen groups
+chisq.test(table(pdata_clean$identity, pdata_clean$Stage), correct = FALSE)
+fisher.test(table(pdata_clean$identity, pdata_clean$Stage), workspace = 2e8)
+fisher.test(table(pdata_clean$identity_COI, pdata_clean$Stage), workspace = 2e8)
+
+pdata_clean <- subset(pdata, !(is.na(Survival_Group)))
+
+##### Supplementary figure comparing OS status by patient cluster
+pdf("./Figures/WashU_Tissue_TCR_Cluster_Surv_Group.pdf", height = 4, width = 5.5)
+ggplot(pdata_clean, aes(x=identity, fill = Survival_Group)) + geom_bar(stat = "count", position = "fill") + theme_minimal() + 
+  scale_fill_brewer(palette = "Dark2")
+dev.off()
+#####*
+
+# Chi square test for significant betweeen groups
+table(pdata_clean$identity, pdata_clean$Survival_Group)
+table(pdata_clean$identity_COI, pdata_clean$Survival_Group)
+chisq.test(table(pdata_clean$identity, pdata_clean$Survival_Group), correct = FALSE)
+fisher.test(table(pdata_clean$identity, pdata_clean$Survival_Group), workspace = 2e8)
+fisher.test(table(pdata_clean$identity_COI, pdata_clean$Survival_Group), workspace = 2e8)
+```
+
+# Use corncob package to test for differentially expressed Metaclusters between patient cluster 3 and all other clusters
+```{r, corncob}
+library(corncob)
+library(phyloseq)
+
+#inflate matrix counts to closer resemble 16S sequence data
+mtx_norm <- mtx*(1*10^6)
+mode(mtx_norm) <- "integer"
+rownames(mtx_norm) <- paste0("MetaCT", "_", 1:nrow(mtx_norm))
+
+#set up phyloseq object
+OTU = otu_table(mtx_norm, taxa_are_rows = TRUE)
+DAT <- data.frame(colData(sce_TCRdist))
+DAT$identity_COI <- sapply(DAT$label, function(x) ifelse(x==3, "Group_3", "ALL"))
+sampledata = sample_data(DAT)
+physeq = phyloseq(OTU, sampledata)
+
+# set up the differential test formula (corncob uses a beta binomial distribution which others have found works best for TCR sequence data)
+#test is Group-3 vs all other groups
+#set FDR cutoff to .25 as this is a discovery tool 
+set.seed(1)
+da_analysis <- differentialTest(formula = ~ identity_COI,
+phi.formula = ~ identity_COI,
+formula_null = ~ 1,
+phi.formula_null = ~ identity_COI,
+test = "Wald", boot = FALSE,
+data = physeq,
+fdr_cutoff = 0.25)
+
+sigMC <- plot(da_analysis)
+
+sigMC <- sigMC$data[,c(1,4)]
+
+#filter to metaclusters upregulated in cluster 3 for downstream analysis 
+sigMCup <- sigMC %>% filter(x > 0)
+sigMCup <- sigMCup %>% dplyr::arrange(desc(x))
+
+MC <- data.frame(names(da_analysis$p_fdr))
+MC <- cbind(MC, da_analysis$p_fdr)
+colnames(MC) <- c("MC", "FDR")
+rownames(MC) <- NULL
+
+MC <- inner_join(sigMC, MC, by = c("taxa" = "MC")) 
+
+p1 <- ggplot(MC, aes(x, -log10(FDR))) + geom_point() + theme_minimal()
+
+MC_label <- data.frame("taxa" = MC$taxa, "log_FDR" = -log10(MC$FDR), "coefficient" = MC$x)
+
+MC_label <- rbind(MC_label %>% filter(coefficient < 0) %>% dplyr::arrange(desc(log_FDR)) %>% distinct(log_FDR,.keep_all = TRUE) %>% 
+                    slice_head(n=10), 
+                  MC_label %>% filter(coefficient > 0) %>% dplyr::arrange(desc(log_FDR)) %>% distinct(log_FDR, .keep_all = TRUE) %>% 
+                    slice_head(n=10))
+
+##### Main Figure Volcano Plot of highly + or - enriched MCs in patient Cluster 3
+pdf("./Figures/WashU_Tissue_sigMC_COI_CornCob_VLCN.pdf", height = 4, width = 5)
+print(p1 + geom_label_repel(data = MC_label,
+                   mapping = aes(coefficient, log_FDR, label = taxa),
+                   size = 2))
+dev.off()
+#####*
+
+# look specifically at the highest enriched cluster (MC_545)
+corncob_da <- bbdml(formula = MetaCT_545 ~ identity_COI,
+phi.formula = ~ identity_COI,
+data = physeq)
+
+#### Main Figure demonstrating the counts of MC 5 in patient cluster 3 vs all other clusters
+pdf("./Figures/WashU_Tissue_sigMC_COI_CornCob_RA.pdf", height = 4, width = 6)
+plot(corncob_da, B = 50, color = "identity_COI")
+dev.off()
+#####*
+#####*
+
+#export enriched MCs so that TCRs can then be identified in Jupyter notebook code
+write.table(sigMCup, "sigMCup_.25_10^6.csv", sep = ",", col.names = TRUE, row.names = TRUE)
+```
+
+#After exporting CSV of upregulated TCR metaclusters, import to Python and identify TCR sequences of metaclusters and export TCR sequences
+#Export TCR distances from Python, (distances between all TCRs in the significant metaclusters)
+#Additionally export TCR sequences of all expanded tissue clones
+#Run TESSA autoencoder on all expanded clones, and reimport TESSA summary
+#Use Python-UMAP implementation to run UMAP and HBDSCAN to cluster Tessa results, export UMAP embeddings and cluster identities
+```{r, plot all clusters}
+
+#load in all TCR sequences enriched in Group-3
+TCRdist_sigMC <- fread("/users/vikrampothuri/Documents/TCR_Graham/Inputs/TCRdist_sigMC_Matrix_Out_.25.csv", sep = ",")
+
+#load in all tissue expanded TCRs
+TCRdist_exp <- fread("/users/vikrampothuri/Documents/TCR_Graham/Inputs/TCRdist_exp_Matrix_Out_.25.csv", sep = ",")
+
+#load in TESSA generated UMAP embedding of all tissue expanded TCRs
+Exp_UMAP <- fread("/users/vikrampothuri/Documents/TCR_Graham/Inputs/TESSA_TcrDist_EXP_UMAP_Embeddings.csv", sep = ",")
+
+# add 2 to DBSCAN index, because python uses zero indexing, and cluster -1 is unassigned TCRs
+Exp_UMAP$DBSCAN <- Exp_UMAP$DBSCAN+2
+
+#prepare object with all tissue expanded TCRs, UMAP embeddings, and TESSA cluster information for significant MCs
+TCRdist_exp <- cbind(TCRdist_exp, Exp_UMAP)
+TCRdist_sigMC <- as.data.frame(TCRdist_sigMC)
+TCRdist_sigMC$adj <- rownames(TCRdist_sigMC)
+TCRdist_sigMC$adj <- as.numeric(TCRdist_sigMC$adj)
+TCRdist_sigMC <- TCRdist_sigMC %>% select('clone_id', 'MC_ID', 'adj')
+
+TCRdist_exp <- merge(TCRdist_exp, TCRdist_sigMC, by = "clone_id", all.x = TRUE)
+
+TCRdist_exp_pt <- TCRdist_exp
+TCRdist_exp_pt$colr <- sapply(TCRdist_exp_pt$MC_ID, function(x) ifelse(is.na(x)==TRUE, "black", "red")) 
+
+#remove TCRs that are unassigned to a TESSA cluster
+TCRdist_exp_pt <- TCRdist_exp_pt %>% filter(DBSCAN != 1)
+
+###### Main Figure UMAP of all Tissue expanded TCRs assigned to a TESSA Cluster, highlighting TCRs belonging to signficant MCs
+png("./Figures/WashU_Tissue_TESSA_MC_UMAP.png",  height = 4, width = 6, units = "in", res = 400)
+ggplot(TCRdist_exp_pt, aes(UMAP_X, UMAP_Y, color = colr)) + geom_point(size = 0.5, alpha = 0.5) + theme_void() + theme(legend.position = "none") + scale_color_manual(values = c("gray90", "red1")) 
+dev.off()
+######*
+
+
+TCRdist_sigMC <- TCRdist_exp %>% select(UMAP_X, UMAP_Y, MC_ID, clone_id, DBSCAN, adj, cdr3_b_aa, subject, count) 
+
+#filter TCR onject down to just TCRs wihtin significant MCs
+TCRdist_sigMC <- na.omit(TCRdist_sigMC)
+
+#start process to build igraph object
+#create vertex dataframe, from each significantly enriched TCR sequences
+vert <- TCRdist_exp 
+vert <- na.omit(vert)
+vert <- vert %>% select(clone_id, MC_ID, DBSCAN, adj, UMAP_X, UMAP_Y)
+
+#add specified colors to vertices by DBSCAN cluster
+colrs <- colorRampPalette(brewer.pal(8, "Dark2"))(length(unique(vert$DBSCAN)))
+colrs <- data.frame(DBSCAN = unique(vert$DBSCAN), color = colrs)
+colrs <- colrs %>% arrange(DBSCAN)
+
+##### Supplementary Figure: umap of all tissue TCRs colored by TESSA Cluster including unassigned TCRs
+png("./Figures/WashU_Tissue_TESSA_UMAP.png", height = 4, width = 6, units = "in", res = 400)
+ggplot(TCRdist_exp, aes(UMAP_X, UMAP_Y, color = as.factor(DBSCAN))) + geom_point(size = 0.5, alpha = 0.5) + theme_void() + theme(legend.position = "none") + scale_color_manual(values = colrs$color)
+dev.off()
+#####*
+
+##### Main Figure: umap of all tissue TCRs colored by TESSA Cluster without unassigned TCRs
+png("./Figures/WashU_Tissue_TESSA_UMAP_MO.png", height = 4, width = 6, units = "in", res = 400)
+ggplot(TCRdist_exp_pt, aes(UMAP_X, UMAP_Y, color = as.factor(DBSCAN))) + geom_point(size = 0.5, alpha = 0.5) + theme_void() + theme(legend.position = "none") + scale_color_manual(values = colrs$color[2:21]) 
+dev.off()
+#####*
+
+#add DBSCAN tessa clusters to vertex dataframe
+vert <- merge(vert, colrs, by = "DBSCAN", all.x = TRUE)
+vert <- vert %>% arrange(adj)
+vert$combo <- paste0(vert$DBSCAN, "_", vert$MC_ID)
+vert$combo <- as.factor(vert$combo)
+vert$combo <- as.numeric(vert$combo)
+
+#weight size of vertex by number of TCRs within TESSA Cluster
+vert <- vert %>% add_count(combo, name = "weight")
+
+vert <- vert %>% group_by(combo) %>% 
+     mutate(clone_ids = paste0(clone_id, collapse = ",")) %>% ungroup() 
+
+vert$clone_id <- NULL
+
+vert <- vert %>% group_by(combo) %>% 
+     mutate(adjs = paste0(adj, collapse = ",")) %>% ungroup() 
+
+vert$adj <- NULL
+
+vert <- vert %>% distinct(combo, .keep_all = TRUE)
+
+vert <- vert %>% arrange(combo)
+
+vert <- data.frame(vert)
+
+#create separate matrix of embedding
+l <- vert %>% select(UMAP_X
+                     , UMAP_Y)
+l <- as.matrix(l)
+
+#create edgelist between vertices within the same MC
+edge_list <- do.call("rbind", lapply(split(vert, vert$MC_ID), function(d) {
+   if (nrow(d) > 1) unique(do.call("rbind", combn(d$combo, 2, simplify = FALSE)))
+}))
+
+edge_list <- data.frame(x = edge_list[,1], y = edge_list[,2])
+edge_list <- as.matrix(edge_list)
+
+#create igraph object
+net_simple <- graph_from_edgelist(edge_list, directed = FALSE)
+
+#add vertex metadata to igraph object                     
+V(net_simple)$color <- vert$color
+
+V(net_simple)$weight <- vert$weight
+
+V(net_simple)$size <- V(net_simple)$weight*.3
+
+V(net_simple)$DBSCAN <- vert$DBSCAN
+
+V(net_simple)$MC_ID <- vert$MC_ID
+
+#add edge metadata to igraph object   
+E(net_simple)$width <- 1
+
+#remove vertices that did not have assigned cluster (ie cluster 1)
+net_simple <- delete_vertices(net_simple, V(net_simple)$DBSCAN==1)
+
+vert <- vert %>% filter(DBSCAN != 1)
+
+l <- vert %>% select(UMAP_X
+                     , UMAP_Y)
+l <- as.matrix(l)
+
+
+##### Main Figure: igraph of TESSA Cluster with edges depicting META Cluster identities
+png("./Figures/WashU_Tissue_TESSA_MC_Bubble_UMAP.png", height = 4, width = 6, units = "in", res = 300)
+plot(net_simple, layout = l,  vertex.label=NA, edge.color = "honeydew3")
+dev.off()
+#####*
+
+#plot TESSA cluster 13 (12 in Manuscript) with all connections
+rem <- which(V(net_simple)$DBSCAN != 13)
+
+edg <- data.frame(as_edgelist(net_simple))
+
+rem <- which(edg$X1 %in% rem)
+
+net_simple_1  <- delete.edges(net_simple, rem)
+
+V(net_simple_1)$x <- l[,1]
+V(net_simple_1)$y <- l[,2]
+
+net_simple_1 <- delete_vertices(net_simple_1, V(net_simple_1)[degree(net_simple_1)==0 & V(net_simple_1)$DBSCAN != 13])
+
+map <- get.vertex.attribute(net_simple_1, "DBSCAN")
+
+net_simple_1 <- contract(net_simple_1, map, vertex.attr.comb = list(DBSCAN = "first", MC_ID = "concat", color = "last", size = "ignore", weight = "sum", x = "last", y = "last"))
+
+net_simple_1   <- delete.vertices(net_simple_1 , V(net_simple_1)[is.na(V(net_simple_1)$DBSCAN)])
+
+l <- data.frame(V(net_simple_1)$x, V(net_simple_1)$y)
+l <- na.omit(l)
+l <- as.matrix(l)
+
+color <- get.vertex.attribute(net_simple_1, "color")
+color <- unlist(color)
+
+net_simple_1 <- delete_vertex_attr(net_simple_1, "color")
+
+V(net_simple_1)$color <- color
+
+V(net_simple_1)$size <- V(net_simple_1)$weight*0.1
+
+E(net_simple_1)$width <- 2
+
+#####Not included figure: igraph Tessa Cluster 12 
+png("./Figures/WashU_Tissue_TESSA_MC_12_Bubble_UMAP.png", height = 4, width = 6, units = "in", res = 300)
+plot(net_simple_1, layout = l,  vertex.label=NA, edge.color = "honeydew3")
+dev.off()
+######*
+
+#look at percentage of clones that belong within a cluster vs the percentage that are shared between clusters
+dtr <- vert %>% group_by(DBSCAN, MC_ID) %>% summarise_at(vars(weight), sum)
+
+#Look at each MC and determine what percent are spread between 1,2,3... TESSA subsets
+#Get all Unique MC_ID
+MC_IDs <- unique(dtr$MC_ID) 
+
+#Create data table for Overlap
+MC_TESSA_Overlap <- data.frame(matrix(ncol=21, nrow = length(MC_IDs)))
+colnames(MC_TESSA_Overlap) <- c("MC_ID",1:20)
+
+#Loop through each unique MC-ID
+for(i in 1:length(MC_IDs)) {
+  temp_id <- MC_IDs[i]
+  #Get entries for each MC_ID
+  temp <- subset(dtr, MC_ID %in% temp_id)
+  
+  #Sum Total of Weight
+  temp_total <- sum(temp$weight)
+  
+  #Order by weight
+  temp <- arrange(temp, desc(weight))
+  
+  MC_TESSA_Overlap$MC_ID[i] <- temp_id
+  
+  #Calculate proportion of eacch MC that is in each TESSA
+  for(j in 1:20) {
+    MC_TESSA_Overlap[i,j+1] <- ifelse(is.na(temp$weight[j]/temp_total), 0, 
+                                      temp$weight[j]/temp_total)
+  }
+}
+
+#Create a running cumulative table
+MC_TESSA_Overlap_Cumulative <- MC_TESSA_Overlap
+temp_Complete <- 0
+
+#Create Cumulative Data Set
+for(i in 1:nrow(MC_TESSA_Overlap)) {
+  
+  #Add them in running total
+  for(j in 1:20) {
+    MC_TESSA_Overlap_Cumulative[i,j+1] <- ifelse(j == 1, MC_TESSA_Overlap_Cumulative[i,j+1],
+                                      MC_TESSA_Overlap_Cumulative[i,j+1] + MC_TESSA_Overlap_Cumulative[i,j])
+    
+    #Case when all are in one TESSA
+    if(j == 1 && MC_TESSA_Overlap_Cumulative[i,j+1] == 1) {
+    temp_Complete <- 1  
+    }
+    
+    #Case when divided across multipl TESSA subunits
+    if(MC_TESSA_Overlap_Cumulative[i,j+1] == 1 && MC_TESSA_Overlap_Cumulative[i,j] != 1) {
+    temp_Complete <- j
+    }
+    MC_TESSA_Overlap_Cumulative$Complete[i] <- temp_Complete
+  }
+}
+
+round(prop.table(table(MC_TESSA_Overlap_Cumulative$Complete, useNA = "ifany")),3)
+
+##### Supplemental Figure: Histogram of Number of TESSA Subsets Containing Complete Metaclusters
+pdf(str_glue("{OUTPUT_DIR}/MC_TESSA_Overlap_Histogram.pdf"), height = 4, width = 4)
+ggplot(MC_TESSA_Overlap_Cumulative, aes(x= Complete)) + geom_bar() + labs(x = "Number of TESSA Subsets that Contain Entire Metacluster", y = "Number of Metaclusters") + theme_minimal()  + scale_fill_brewer(palette = "Pastel1")
+dev.off()
+#####*
+
+#For Bar Plot of individual MC
+TESSA_1 <- subset(MC_TESSA_Overlap, select = c("MC_ID",1))
+names(TESSA_1)[names(TESSA_1) == 1] <- "Percentage"
+TESSA_1$TESSA_Number <- 1
+TESSA_2 <- subset(MC_TESSA_Overlap, select = c("MC_ID",2))
+names(TESSA_2)[names(TESSA_2) == 2] <- "Percentage"
+TESSA_2$TESSA_Number <- 2
+TESSA_3 <- subset(MC_TESSA_Overlap, select = c("MC_ID",3))
+names(TESSA_3)[names(TESSA_3) == 3] <- "Percentage"
+TESSA_3$TESSA_Number <- 3
+TESSA_4 <- subset(MC_TESSA_Overlap, select = c("MC_ID",4))
+names(TESSA_4)[names(TESSA_4) == 4] <- "Percentage"
+TESSA_4$TESSA_Number <- 4
+TESSA_5 <- subset(MC_TESSA_Overlap, select = c("MC_ID",5))
+names(TESSA_5)[names(TESSA_5) == 5] <- "Percentage"
+TESSA_5$TESSA_Number <- 5
+
+MC_TESSA_Bar_Plot <- rbind(TESSA_1, TESSA_2, TESSA_3, TESSA_4, TESSA_5)
+MC_TESSA_Bar_Plot$TESSA_Number <- factor(MC_TESSA_Bar_Plot$TESSA_Number, levels = c(1:5))
+MC_TESSA_Bar_Plot$MC_ID <- as.factor(MC_TESSA_Bar_Plot$MC_ID)
+
+#Get mean percentage of TCRs in each MC that are in one TESSA subset
+mean(TESSA_1$Percentage)
+
+##### Not used Figure: Breakdown of TCRs across TESSA subsets for each MC (too crowded to use)
+ggplot(MC_TESSA_Bar_Plot, aes(x = MC_ID, y = Percentage, fill = TESSA_Number)) + geom_col()
+####*
+
+
+#For Bar Plot using only a sample (100 random MCs)
+MC_TESSA_Overlap_sample <- sample_n(MC_TESSA_Overlap,100)
+TESSA_1_sample <- subset(MC_TESSA_Overlap_sample, select = c("MC_ID",1))
+names(TESSA_1_sample)[names(TESSA_1_sample) == 1] <- "Percentage"
+TESSA_1_sample$TESSA_Number <- 1
+TESSA_2_sample <- subset(MC_TESSA_Overlap_sample, select = c("MC_ID",2))
+names(TESSA_2_sample)[names(TESSA_2_sample) == 2] <- "Percentage"
+TESSA_2_sample$TESSA_Number <- 2
+TESSA_3_sample <- subset(MC_TESSA_Overlap_sample, select = c("MC_ID",3))
+names(TESSA_3_sample)[names(TESSA_3_sample) == 3] <- "Percentage"
+TESSA_3_sample$TESSA_Number <- 3
+TESSA_4_sample <- subset(MC_TESSA_Overlap_sample, select = c("MC_ID",4))
+names(TESSA_4_sample)[names(TESSA_4_sample) == 4] <- "Percentage"
+TESSA_4_sample$TESSA_Number <- 4
+TESSA_5_sample <- subset(MC_TESSA_Overlap_sample, select = c("MC_ID",5))
+names(TESSA_5_sample)[names(TESSA_5_sample) == 5] <- "Percentage"
+TESSA_5_sample$TESSA_Number <- 5
+
+MC_TESSA_Bar_Plot_sample <- rbind(TESSA_1_sample, TESSA_2_sample, TESSA_3_sample, TESSA_4_sample, TESSA_5_sample)
+MC_TESSA_Bar_Plot_sample$TESSA_Number <- factor(MC_TESSA_Bar_Plot_sample$TESSA_Number, levels = c(5,4,3,2,1))
+MC_TESSA_Bar_Plot_sample$MC_ID <- as.factor(MC_TESSA_Bar_Plot_sample$MC_ID)
+MC_TESSA_Bar_Plot_sample$Percentage <- MC_TESSA_Bar_Plot_sample$Percentage * 100
+
+##### Supplemental Figure: Breakdown of TCRs across TESSA subsets for 100 randomly selected MCs
+pdf(str_glue("{OUTPUT_DIR}/MC_TESSA_Overlap_BarPlot.pdf"))
+ggplot(MC_TESSA_Bar_Plot_sample, aes(x = MC_ID, y = Percentage, fill = TESSA_Number)) + geom_col() + xlab("Metacluster IDs") + ylab ("Percentage of TCRs in Metacluster") + theme(axis.text.x = element_text(size=4, angle=45)) + scale_fill_brewer(palette = "Set3") 
+dev.off()
+#####*
+
+library(lattice)
+
+#Set up data frame for Histogram showing distribution of MC overlap within TESSA cluster
+total <- dtr %>% group_by(MC_ID) %>% summarise_at(vars(weight), sum)
+
+dtr <- full_join(dtr, total, by = "MC_ID")
+
+dtr$fraction <- (dtr$weight.x/dtr$weight.y)*100
+
+dtr <- dtr %>% group_by(MC_ID)%>% arrange(desc(fraction)) %>% top_n(1, fraction) %>% pull(fraction) 
+
+##### Supplementary Figure of histogram showing distribution of MC overlap  within a TESSA Cluster
+pdf("./Figures/WashU_Tissue_TESSA_MC_Overlap.pdf", height = 8, width = 12)
+histogram(dtr, breaks = 20, xlim = c(0,100), 
+          xlab = "Percent Overlap", ylab = "Percent of Total MC's", col = "seagreen", main = "Percent Overlap of MC within Tessa Cluster")
+dev.off()
+#####*
+
+#score each of the TESSA clusters, by comparing the correlation of OS, with a patient's productive frequency of MC's within a particular Tessa Cluster
+#prep bulk clonotype table
+Rearrange_Summary <- 
+  read.table("/users/vikrampothuri/Documents/TCR_Graham/Inputs/Tissue_Bioidentity_TCRdist_with_subject.tsv", 
+             sep = "\t", header = TRUE)
+
+Rearrange_Summary <- Rearrange_Summary[1:4]
+
+Rearrange_Summary <- na.omit(Rearrange_Summary)
+
+Rearrange_Summary <- Rearrange_Summary %>% group_by(subject, amino_acid) %>% 
+  summarise_at(vars(productive_frequency, templates), function(x) sum(x)) %>% ungroup()
+
+pdata <- read.csv("/users/vikrampothuri/Documents/TCR_Graham/Inputs/WashU.Tissue.csv", sep = ",", fileEncoding = "UTF-8-BOM", na.strings="")
+
+#Loop through the TESSA MC's that you will search for in each patient
+logr_chsquare <- list()
+logr_pval <- list()
+corr_r <- list()
+corr_p <- list()
+MC_Count <- list()
+cdr3_Count <- list()
+median_OS <- list()
+
+for (i in 1:length(unique(TCRdist_sigMC$DBSCAN))-1) {
+
+sigMC <- TCRdist_sigMC %>% filter(DBSCAN == i+1) %>% pull(MC_ID)
+
+MC_Count[i] <- length(unique(sigMC))
+
+sigMC <- TCRdist_sigMC %>% filter(MC_ID %in% sigMC) %>% pull(cdr3_b_aa)
+
+cdr3_Count[i] <- length(unique(sigMC))
+
+test <- Rearrange_Summary
+
+test$sigMC <- test$amino_acid %in% sigMC
+
+test <- test %>% filter(sigMC == TRUE) %>%
+  group_by(subject) %>% summarize_at(vars(productive_frequency), function(x) sum(x)) %>% ungroup()
+
+test$subject <- gsub("-Tissue_TCRB", "", test$subject)
+test$subject <- as.integer(test$subject)
+
+#Load in clinical data
+Clinical <- merge(pdata, test, by.x="Sample_Name", 
+                  by.y = "subject", all.x = TRUE)
+
+Clinical <- na.omit(Clinical)
+
+Clinical$productive_frequency <- sapply(Clinical$productive_frequency, 
+                                     function(x) ifelse(is.na(x), 0, x))
+  
+Clinical$status <- Clinical$productive_frequency >= quantile(Clinical$productive_frequency)[3]
+  
+mycolors <- c("#7CAE00", "Black")
+
+fit <- survdiff(Surv(time = Clinical$Survival, event = Clinical$Deceased) 
+                 ~ status, data = Clinical, rho = 0)
+
+logr_chsquare[i] <- fit$chisq
+
+logr_pval[i]  <- pchisq(fit$chisq, df=1, lower.tail = FALSE)
+
+
+fit <- survfit(Surv(time = Clinical$Survival, event = Clinical$Deceased) 
+                 ~ status, data = Clinical)
+
+
+fit <- surv_median(fit)
+
+median_OS[i] <- (fit$median[2]-fit$median[1])/30.417
+
+
+fit <- cor.test(Clinical$Survival, Clinical$productive_frequency, method = "spearman")
+
+corr_r[i] <- fit$estimate
+
+corr_p[i] <- fit$p.value
+
+} 
+
+logr_chsquare <- unlist(logr_chsquare)
+logr_pval <- unlist(logr_pval)
+corr_r <- unlist(corr_r)
+corr_p <- unlist(corr_p)
+MC_Count <- unlist(MC_Count)
+cdr3_Count <- unlist(cdr3_Count)
+median_OS <- unlist(median_OS)
+
+df <- data.frame("tessa.cluster" = c(1:20),
+                 "logrank.chi_square" = logr_chsquare, 
+                 "logrank.pval" = logr_pval, 
+                 "spearman.R" = corr_r, 
+                 "spearman.pval" = corr_p, 
+                 "MC.count" = MC_Count, 
+                 "CDR3.count" = cdr3_Count,
+                 "median_OS" = median_OS)
+
+df$spearman.pval.adj <- p.adjust(df$spearman.pval, method = "bonferroni")
+df$logrank.pval.adj <- p.adjust(df$logrank.pval, method = "bonferroni")
+
+
+df$logrank.sig <- sapply(df$logrank.pval.adj, function(x) ifelse(x<=0.05, "*", "ns"))
+df$spearman.sig <- sapply(df$spearman.pval.adj, function(x) ifelse(x<=0.05, "*", "ns"))
+
+df <- df %>% dplyr::arrange(desc(spearman.R)) 
+
+df <- df %>% 
+ mutate_if(is.numeric, round, digits = 4)
+
+#create table of results depicting the association of each TESSA cluster with overall survival 
+write.table(df, "./TCRdist/WashU_Tessa_Cluster_Survival_Stats.csv", sep = ",", col.names = TRUE, row.names = FALSE)
+```
+
+#Save down TESSA 12 subset for further anaylsis of productiev ferquency in Tissue and PBMC
+```{r}
+sigMC <- TCRdist_sigMC %>% filter(DBSCAN == 13) %>% pull(MC_ID)
+
+MC_Count[i] <- length(unique(sigMC))
+
+sigMC <- TCRdist_sigMC %>% filter(MC_ID %in% sigMC) %>% pull(cdr3_b_aa)
+
+cdr3_Count[i] <- length(unique(sigMC))
+
+test <- Rearrange_Summary
+
+test$sigMC <- test$amino_acid %in% sigMC
+
+test <- test %>% filter(sigMC == TRUE) %>%
+  group_by(subject) %>% summarize_at(vars(productive_frequency), function(x) sum(x)) %>% ungroup()
+
+test$subject <- gsub("-Tissue_TCRB", "", test$subject)
+test$subject <- as.integer(test$subject)
+
+WashU_tissue_TESSA_12 <- test
+```
+
+#Export MCs found within each TESSA cluster, then loaded into python script to compute TCRdistances between each TESSA cluster and the UW cohort Tissue TCRs. Then export CSVs of UW cohort MC's.
+```{r, MC_Export}
+for (i in unique(V(net_simple)$DBSCAN)) {
+    comm <- unique(V(net_simple)$MC_ID[which(V(net_simple)$DBSCAN == i)])
+    write.table(data.frame(MC.ID = comm), 
+                file = paste0("./TCRdist/cluster_comm/", "net_simple", "_TESSA_", i-1, ".csv"), 
+                col.names = TRUE, row.names = FALSE, sep = ",")
+  }
+```
+
+#Score UW Samples
+```{r, TCR_Scoring_loop_UW}
+
+#load in csv files with metaclonotypes
+fl <- list.files(path = "/users/vikrampothuri/Documents/TCR_Graham/Inputs/cluster_MC_UW/")
+fl <- gsub(".csv_out.csv", "", fl)
+
+library(stringr)
+
+fl <- str_sort(fl, numeric = TRUE)
+
+#prep bulk clonotype table
+
+Rearrange_Summary_UW <- 
+  read.table("/users/vikrampothuri/Documents/TCR_Graham/Inputs/UW_Tissue_Bioidentity_TCRdist.tsv", 
+             sep = "\t", header = TRUE)
+
+Rearrange_Summary_UW <- Rearrange_Summary_UW[1:4]
+
+Rearrange_Summary_UW <- Rearrange_Summary_UW[-grepl("na",
+                        Rearrange_Summary_UW$templates),]
+
+Rearrange_Summary_UW$templates <- as.integer(Rearrange_Summary_UW$templates)
+
+Rearrange_Summary_UW <- na.omit(Rearrange_Summary_UW)
+
+Rearrange_Summary_UW <- Rearrange_Summary_UW %>% group_by(sample_name, amino_acid) %>% 
+  summarise_at(vars(productive_frequency, templates), function(x) sum(x)) %>% ungroup()
+
+logr_chsquare <- list()
+logr_pval <- list()
+corr_r <- list()
+corr_p <- list()
+MC_Count <- list()
+cdr3_Count <- list()
+
+for (i in 1:length(fl)) {
+
+  clone_list  <- Rearrange_Summary_UW
+  
+  #Load in set of clonotypes that you are looking for in other samples
+
+  sigMC <- read.table(paste0("/users/vikrampothuri/Documents/TCR_Graham/Inputs/cluster_MC_UW/", fl[i], ".csv_out.csv"), sep = ",", header = TRUE)
+  
+  MC_Count[i] <- length(unique(sigMC$MC_ID))
+  
+  sigMC <- sigMC$cdr3_b_aa
+  
+  cdr3_Count[i] <- length(unique(sigMC))
+
+  clone_list$sigMC <- clone_list$amino_acid %in% sigMC
+
+  clone_list <- clone_list %>% filter(sigMC == TRUE) %>% group_by(sample_name) %>%
+    summarize_at(vars(productive_frequency), function(x) sum(x)) %>% ungroup()
+
+  clone_list$sample_name <- gsub("FFPE_", "", clone_list$sample_name)
+
+  Clinical <- fread("/users/vikrampothuri/Documents/TCR_Graham/Inputs/UW.csv")
+
+  Clinical <- merge(Clinical, clone_list, by.x="Sample_Name", 
+                  by.y = "sample_name", all.x = TRUE)
+
+  names(Clinical)[names(Clinical) == 'productive_frequency'] <- 'sigMC_prod_freq'
+
+  Clinical$sigMC_prod_freq <- sapply(Clinical$sigMC_prod_freq, 
+                                     function(x) ifelse(is.na(x), 0, x))
+
+  Clinical$status <- Clinical$sigMC_prod_freq >= quantile(Clinical$sigMC_prod_freq)[4]
+
+  fit <- survdiff(Surv(time = Clinical$Survival, event = Clinical$Deceased) 
+                   ~ status, data = Clinical)
+  
+  logr_chsquare[i] <- fit$chisq
+
+  logr_pval[i]  <- pchisq(fit$chisq, df=1, lower.tail = FALSE)
+
+
+  fit <- cor.test(Clinical$Survival, Clinical$sigMC_prod_freq)
+
+  corr_r[i] <- fit$estimate
+
+  corr_p[i] <- fit$p.value
+}
+
+logr_chsquare <- unlist(logr_chsquare)
+logr_pval <- unlist(logr_pval)
+corr_r <- unlist(corr_r)
+corr_p <- unlist(corr_p)
+MC_Count <- unlist(MC_Count)
+cdr3_Count <- unlist(cdr3_Count)
+
+df <- data.frame("UW_tessa.cluster" = c(1:20),
+                 "logrank.chi_square" = logr_chsquare, 
+                 "logrank.pval" = logr_pval, 
+                 "pearson.R" = corr_r, 
+                 "pearson.pval" = corr_p, 
+                 "MC.count" = MC_Count, 
+                 "CDR3.count" = cdr3_Count)
+
+df$logrank.sig <- sapply(df$logrank.pval, function(x) ifelse(x<=0.05, "*", "ns"))
+df$pearson.sig <- sapply(df$pearson.pval, function(x) ifelse(x<=0.05, "*", "ns"))
+
+df <- df[,c(1,6,7,2,3,8,4,5,9)]
+
+df <- df %>% arrange(logrank.sig, desc(pearson.R))
+
+df <- df %>% 
+ mutate_if(is.numeric, round, digits = 4)
+
+#Tessa cluster 12 results in significant survival in UW cohort, print results for TESSA cluster
+clone_list  <- Rearrange_Summary_UW
+
+sigMC <- read.table(paste0("/users/vikrampothuri/Documents/TCR_Graham/Inputs/cluster_MC_UW/", fl[12], ".csv_out.csv"), sep = ",", header = TRUE)
+  
+sigMC <- sigMC$cdr3_b_aa
+
+clone_list$sigMC <- clone_list$amino_acid %in% sigMC
+
+clone_list <- clone_list %>% filter(sigMC == TRUE) %>% group_by(sample_name) %>%
+    summarize_at(vars(productive_frequency), function(x) sum(x)) %>% ungroup()
+
+clone_list$sample_name <- gsub("FFPE_", "", clone_list$sample_name)
+
+Clinical <- fread("/users/vikrampothuri/Documents/TCR_Graham/Inputs/UW.csv")
+
+Clinical <- merge(Clinical, clone_list, by.x="Sample_Name", 
+                  by.y = "sample_name", all.x = TRUE)
+
+names(Clinical)[names(Clinical) == 'productive_frequency'] <- 'sigMC_prod_freq'
+
+Clinical$sigMC_prod_freq <- sapply(Clinical$sigMC_prod_freq, 
+                                     function(x) ifelse(is.na(x), 0, x))
+
+
+###### Main Figure: UW OS Correlation with productive frequency of TESA Cluster 12 MCs
+png("./Figures/UW_Tissue_TESSA_MC_12_OS_Correlation.png", height = 4, width = 6, units = "in", res = 300)
+print(ggscatter(Clinical, x = "Survival", y = "sigMC_prod_freq", 
+color ="Survival", add = "reg.line", conf.int = TRUE) + theme_classic() + 
+  ylab("Cumulative Productive Frequency") + ggtitle("UW Tessa Cluster 12 Shared Specificity") +
+  stat_cor(method = "pearson") + labs(color = "Survival") + theme_minimal())
+dev.off()  
+######*
+
+Clinical$status <- Clinical$sigMC_prod_freq >= quantile(Clinical$sigMC_prod_freq)[4]
+  
+#Changed Colors
+mycolors <- c("Black", "#B16548")
+
+fit <- survfit(Surv(time = Clinical$Survival/30.4167, event = Clinical$Deceased) 
+                 ~ status, data = Clinical)
+
+#Original format
+fit_surv <- ggsurvplot(fit, data = Clinical, risk.table = FALSE, surv.median.line = "hv",
+                         pval = TRUE, pval.method = TRUE)$plot + scale_color_manual(values = mycolors)
+
+#Formatted
+fit_surv <- ggsurvplot(fit, data = Clinical, risk.table = TRUE, risk.table.y.text= FALSE,risk.table.fontsize = 4 , risk.table.height = .3, break.time.by = 40, surv.median.line = "hv", pval = TRUE, pval.method = TRUE, palette = mycolors, axes.offset = FALSE, xlab = "Months")
+fit_surv$table <- fit_surv$table + theme(plot.title = element_text(hjust = 0.5))
+
+###### Main Figure: Kaplan Meier of Upper quartile TESSA Cluster 12 productive frequency patients vs all others
+png("/users/vikrampothuri/Documents/TCR_Graham/Figures/UW_Tissue_TESSA_MC_12_Survival_Curve.png", height = 4, width = 4.5, units = "in", res = 300)
+print(fit_surv)
+dev.off()  
+######*
+#PDF Output
+###### Main Figure: Kaplain Meier of Upper quartile TESSA Cluster 12 productive frequency pateints vs all others
+pdf("/users/vikrampothuri/Documents/TCR_Graham/Figures/UW_Tissue_TESSA_MC_12_Survival_Curve.pdf")
+print(fit_surv)
+dev.off()  
+######*
+######*
+
+#Calculate Hazard Ratios
+#Create temp date frame with switched levels
+surv<- Surv(Clinical$Survival/30.4167, event = Clinical$Deceased)
+#paste in from above after ~
+res.cox <- coxph(surv ~ status, data = Clinical)
+log_rank <- survdiff(surv ~ status, data = Clinical)
+zphtest<-cox.zph(res.cox, terms=FALSE)
+zphtest
+#log-rank test
+log_rank <- survdiff(surv ~ status, data = Clinical)
+summary(res.cox)
+
+mycolors <- c("#F8766D", "#00BFC4")
+
+##### Not used Figure: UW TESSA upper quartile Cluster 12 vs all: True Entropy
+pdf("./Figures/UW_Tessa_12_Entropy.pdf", height = 4, width = 5.5)
+print(ggplot(Clinical, aes_string(x = "status", y = "True_Entropy", group = "status", fill = "status")) + geom_boxplot() +
+  geom_hline(yintercept = mean(Clinical$True_Entropy), linetype = 2) + 
+  stat_compare_means(method = "t.test", label.y = 15) +       
+  ggtitle("True Entropy") + theme_classic() + scale_fill_manual(values= mycolors) +
+  theme(plot.title = element_text(hjust = 0.5), axis.title.x=element_blank(), axis.title.y=element_blank())) 
+dev.off()
+#######*
+
+
+##### Supplementary Figure: UW TESSA upper quartile Cluster 12 vs all: Fraction T cell
+pdf("./Figures/UW_Tessa_12_TFraction.pdf", height = 4, width = 5.5)
+print(ggplot(Clinical, aes_string(x = "status", y = "fraction_productive_of_cells", group = "status", fill = "status")) + geom_boxplot() +
+  geom_hline(yintercept = mean(Clinical$fraction_productive_of_cells), linetype = 2) + 
+  stat_compare_means(method = "t.test", label.y = .4) +       
+  ggtitle("Estimated T-cell Fraction") + theme_classic() + scale_fill_manual(values= mycolors) +
+  theme(plot.title = element_text(hjust = 0.5), axis.title.x=element_blank(), axis.title.y=element_blank())) 
+dev.off()
+######*
+
+##### Not used Figure: UW TESSA upper quartile Cluster 12 vs all: Age
+pdf("./Figures/UW_Tessa_12_Age.pdf", height = 4, width = 5.5)
+print(ggplot(Clinical, aes_string(x = "status", y = "Age", group = "status", fill = "status")) + 
+        geom_boxplot() +
+  geom_hline(yintercept = mean(Clinical$Age), linetype = 2) + 
+  stat_compare_means(method = "t.test", label.y = .4) +  
+  ggtitle("Age") + theme_classic() + scale_fill_manual(values= mycolors) +
+  theme(plot.title = element_text(hjust = 0.5), axis.title.x=element_blank(), axis.title.y=element_blank())) 
+dev.off()
+######*
+```
+
+#look for clones in a seperate 5' Single Cell RNAseq dataset from 
+#"Single-Cell Sequencing Reveals Trajectory of Tumor-Infiltrating Lymphocyte States in Pancreatic Cancer"
+```{r, single_cell_search}
+drs <- list.dirs("/users/vikrampothuri/Documents/TCR_Graham/Inputs/WithRNA", recursive = FALSE, full.names = FALSE)
+
+cell_dist <- data.frame("subject" = character(), 
+                        "count" = integer(), 
+                        "v_b_gene" = character(), 
+                        "j_b_gene" = character(),
+                        "cdr3_b_aa" = character(),
+                        "cdr3_b_nucseq" = character())
+                        
+
+#loop through filtered contig annotation files from each single cell RNAseq sample
+#format dataframe to be compatible with TCRdist3
+for (i in 1:length(drs)) {
+  
+  
+  cell <- read.table(paste0("/users/vikrampothuri/Documents/TCR_Graham/Inputs/WithRNA/",
+                          drs[i], "/filtered_contig_annotations.csv"), sep = ",", header = TRUE)
+  
+  cell <- data.frame(cell)
+  
+  cell <- cell %>% filter(grepl("TRB", cell$chain))
+  
+  cell <- cell %>% filter(productive %in% "true")
+  
+  cell$v_b_gene <- sapply(cell$v_gene, function(x) paste0(x, "*01"))
+  
+  cell$j_b_gene <- sapply(cell$j_gene, function(x) paste0(x, "*01"))
+  
+  cell$cdr3_b_aa <- cell$cdr3
+  
+  cell$cdr3_b_nucseq <- cell$cdr3_nt
+  
+  cell <- cell %>% group_by(v_b_gene, j_b_gene, cdr3_b_aa, cdr3_b_nucseq) %>% summarize(raw_clonotype_id , count = n())
+  
+  cell <- distinct(cell, cdr3_b_nucseq, .keep_all = TRUE)
+  
+  cell$subject <- drs[i]
+  
+  cell$raw_clonotype_id <- NULL
+  
+  cell_dist <- rbind(cell_dist, cell)
+  
+}
+
+#export final csv of beta chain TCRs with productive rearrangments: Load into Jupyter Notebook to compute distances to WU Tessa Cluster 12 TCRs
+write.table(cell_dist, "C:/Users/grhog/Documents/Human_PDAC_TCR_Project/TCRdist/tcrdist_sc_beta_input.csv", row.names = FALSE, col.names = TRUE, sep = ",")
+
+#load back in Tessa 12 MCs with overlap in single cell data set
+sc_beta_dist <- read.table("/users/vikrampothuri/Documents/TCR_Graham/Inputs/tcrdist_sc_beta_tessa_12.csv", sep = ",", header = TRUE)
+
+#create euler by MC.ID
+
+sc_beta_T12_dist <- sc_beta_dist %>% group_by(MC_ID) %>% summarise(count = sum(count))
+
+sigMC <- read.table(paste0("/users/vikrampothuri/Documents/TCR_Graham/Inputs/cluster_MC_UW/", fl[12], ".csv_out.csv"), sep = ",", header = TRUE)
+
+uw_T12_dist <- sigMC %>% group_by(MC_ID) %>% summarise(count = sum(count))
+
+wusm_T12_dist <- TCRdist_sigMC %>% filter(DBSCAN == 13) %>% distinct(MC_ID)
+
+#make euler plots of overlap between all three datasets
+
+library(eulerr)
+
+eul <- data.frame("WUSM" = wusm_T12_dist$MC_ID %in% wusm_T12_dist$MC_ID, 
+                  "UW" = wusm_T12_dist$MC_ID %in% uw_T12_dist$MC_ID, 
+                  "MDA" =  wusm_T12_dist$MC_ID %in% sc_beta_T12_dist$MC_ID)
+
+
+rownames(eul) <- wusm_T12_dist$MC_ID
+
+set.seed(1000)
+
+fit <- euler(eul)
+
+
+#####Main Figure: Overlap of 3 datasets by MetaClusters enriched in Tessa Cluster 12
+png("./Figures/Euler_MC.png", height = 4, width = 6, units = "in", res = 300)
+plot(fit, quantities = TRUE)
+dev.off()
+#######*
+
+
+#find MC's that are found within all three datasets
+eul$MC.ID <- rownames(eul)
+
+eul <- eul %>% mutate(set = paste0(eul$UW, "_" ,eul$MDA, "_", eul$WUSM))
+
+eul <- eul %>% filter(set %in% "TRUE_TRUE_TRUE")
+
+MC_Set3 <- eul$MC.ID
+
+
+#create euler by CDR3
+wusm_T12_dist <- TCRdist_sigMC %>% filter(MC_ID %in% wusm_T12_dist$MC_ID) %>% distinct(cdr3_b_aa)
+
+sc_beta_T12_dist <- sc_beta_dist %>% group_by(cdr3_b_aa) %>% summarise(count = sum(count))
+
+uw_T12_dist <- sigMC %>% group_by(cdr3_b_aa) %>% summarise(count = sum(count))
+
+#make euler plots of overlap
+total <- c(wusm_T12_dist$cdr3_b_aa, sc_beta_T12_dist$cdr3_b_aa, uw_T12_dist$cdr3_b_aa)
+
+total <- unique(total)
+
+eul <- data.frame("WUSM" = total %in% wusm_T12_dist$cdr3_b_aa, 
+                  "UW" = total %in% uw_T12_dist$cdr3_b_aa, 
+                  "MDA" =  total %in% sc_beta_T12_dist$cdr3_b_aa)
+
+
+rownames(eul) <- total
+
+set.seed(1000)
+
+fit <- euler(eul)
+
+#####Supplementary Figure: Overlap of 3 datasets by CDR3 enriched in Tessa Cluster 12
+png("./Figures/Euler_CDR3.png", height = 4, width = 6, units = "in", res = 300)
+plot(fit, quantities = TRUE)
+dev.off()
+
+#create beta chain CDR3 sequences for 3 way conserved MCs
+wusm_T12_dist <- TCRdist_sigMC %>% filter(MC_ID %in% MC_Set3) %>% select(cdr3_b_aa, MC_ID)  
+
+sc_beta_T12_dist <- sc_beta_dist %>% filter(MC_ID %in% MC_Set3) %>% select(cdr3_b_aa, MC_ID) 
+
+uw_T12_dist <- sigMC %>% filter(MC_ID %in% MC_Set3) %>% select(cdr3_b_aa, MC_ID) 
+
+MC_Set3_CDR3B <- rbind(wusm_T12_dist, sc_beta_T12_dist, uw_T12_dist)
+
+MC_Set3_CDR3B <- MC_Set3_CDR3B %>% distinct(cdr3_b_aa, MC_ID)
+
+MC_Set3_CDR3B <- split(MC_Set3_CDR3B, f = MC_Set3_CDR3B$MC_ID)
+
+#loop through and write csv of CDR3 found within each three way shared MC
+for (i in 1:length(MC_Set3_CDR3B)){
+    MC_Set3 <- MC_Set3_CDR3B[[i]] %>% pull(cdr3_b_aa)
+    write.table(MC_Set3 , paste0(names(MC_Set3_CDR3B[i]), "_TCRmatch.txt"), sep = " ", col.names = FALSE, row.names = FALSE, quote = FALSE)
+}
+
+#Align sequences of three way shared MCs
+library(msa)
+
+MC_Set3_CDR3B <- lapply(MC_Set3_CDR3B, function(x) {
+    x <- x %>% pull(cdr3_b_aa)
+    x <- msa(x, type = "protein", order = "aligned", method = "ClustalW")
+    x <- as.character(x)
+    }
+  )
+
+#####Main Figure: Consensus Sequence of CDR3 from 3 way shared MCs
+png("./Figures/Consensus_Motif.png", height = 4, width = 6, units = "in", res = 300)
+ggseqlogo(MC_Set3_CDR3B, seq_type='aa', method = 'prob')
+dev.off()
+```
+
+```{r, single_cell_pheno}
+
+
+TCR_5P <- readRDS("C:/Users/grhog/Documents/Human_PDAC_TCR_Project/5'_Single_Cell/221009_TCR_Merge.rds")
+
+
+library(ProjecTILs)
+library(Seurat)
+
+ref <- readRDS("C:\\Users\\grhog\\Documents\\Human_PDAC_TCR_Project\\ref_TILAtlas_mouse_v1.rds")
+
+
+TCR_5P <- CreateSeuratObject(counts = TCR_5P@assays$SCT@counts, meta.data = TCR_5P@meta.data)
+
+query <- make.projection(TCR_5P, ref = ref, query.assay = "RNA")
+
+
+query.projected <- cellstate.predict(ref = ref, query = query)
+
+
+
+
+saveRDS(query.projected, "C:/Users/grhog/Documents/Human_PDAC_TCR_Project/5'_Single_Cell/221024_TCR_Projectil.rds")
+
+query.projected <- readRDS("C:/Users/grhog/Documents/Human_PDAC_TCR_Project/5'_Single_Cell/221024_TCR_Projectil.rds")
+
+#add T12 CDR3_Beta Column
+
+sc_beta_dist <- read.table("./TCRdist/tcrdist_sc_beta_tessa_12.csv", sep = ",", header = TRUE)
+
+sc_beta_T12_dist <- sc_beta_dist %>% group_by(cdr3_b_aa) %>% summarise(count = sum(count))
+
+sc_beta_T12_dist <- sc_beta_T12_dist %>% distinct(cdr3_b_aa) %>% pull(cdr3_b_aa)
+
+
+
+T12_MC_Row <- data.frame(
+    cell = rownames(TCR_5P@meta.data[which(TCR_5P@meta.data$cdr3_beta %in% sc_beta_T12_dist),]), 
+    cdr3_beta = TCR_5P@meta.data[which(TCR_5P@meta.data$cdr3_beta %in% sc_beta_T12_dist),"cdr3_beta"])
+
+rownames(T12_MC_Row) <- T12_MC_Row[,1]
+T12_MC_Row[,1] <- NULL
+
+query.projected <- AddMetaData(query.projected, T12_MC_Row, col.name = "T12_MC")
+
+
+
+#add T12 MC_ID Column
+
+T12_MC_ID <- sc_beta_dist %>% select_at(c("cdr3_b_aa", "MC_ID"))
+
+T12_MC_Row$barcode <- rownames(T12_MC_Row)
+
+T12_MC_ID <- merge(T12_MC_Row, T12_MC_ID, by.x = "cdr3_beta", by.y = "cdr3_b_aa", all.x = TRUE)
+
+T12_MC_ID <- distinct(T12_MC_ID)
+
+rownames(T12_MC_ID) <- T12_MC_ID$barcode
+
+T12_MC_ID$barcode <- NULL
+T12_MC_ID$cdr3_beta <- NULL
+
+query.projected <- AddMetaData(query.projected, T12_MC_ID, col.name = "MC_ID")
+
+
+
+
+
+#add 3way MC_ID column
+
+T12_MC_ID <- sc_beta_dist %>% select_at(c("cdr3_b_aa", "MC_ID"))
+
+T12_MC_Row$barcode <- rownames(T12_MC_Row)
+
+T12_MC_ID_3way <- T12_MC_ID %>% filter(MC_ID %in% MC_Set3)
+
+T12_MC_ID_3way <- merge(T12_MC_Row, T12_MC_ID_3way, by.x = "cdr3_beta", by.y = "cdr3_b_aa", all.x = TRUE)
+
+T12_MC_ID_3way <- distinct(T12_MC_ID_3way)
+
+rownames(T12_MC_ID_3way) <- T12_MC_ID_3way$barcode
+
+T12_MC_ID_3way$barcode <- NULL
+T12_MC_ID_3way$cdr3_beta <- NULL
+
+query.projected <- AddMetaData(query.projected, T12_MC_ID_3way, col.name = "MC_ID_3WAY")
+
+
+
+
+T12_MC_ID <- sc_beta_dist %>% select_at(c("cdr3_b_aa", "MC_ID"))
+
+T12_MC_Row$barcode <- rownames(T12_MC_Row)
+
+T12_MC_ID <- merge(T12_MC_Row, T12_MC_ID, by.x = "cdr3_beta", by.y = "cdr3_b_aa", all.x = TRUE)
+
+T12_MC_ID <- distinct(T12_MC_ID)
+
+
+T12_MC_ID <- T12_MC_ID %>% filter(MC_ID %in% MC_Set3)
+
+colrs <- brewer.pal(7, "Dark2")[c(1:4,6:7)]
+colrs <- data.frame(MC_ID = unique(T12_MC_ID$MC_ID), color = colrs)
+colrs <- merge(T12_MC_ID, colrs, by = "MC_ID")
+
+rownames(colrs) <- colrs$barcode
+colrs$MC_ID <- NULL
+colrs$barcode <- NULL
+colrs$cdr3_beta <- NULL
+
+query.projected <- AddMetaData(query.projected, colrs, col.name = "color")
+
+
+saveRDS(query.projected, "C:/Users/grhog/Documents/Human_PDAC_TCR_Project/5'_Single_Cell/221024_TCR_Projectil.rds")
+
+#query.projected <- readRDS("C:/Users/grhog/Documents/Human_PDAC_TCR_Project/5'_Single_Cell/221024_TCR_Projectil.rds")
+
+tumor <- unique(query.projected$sample)[-(grep("_IP", unique(query.projected$sample)))]
+tumor <- tumor[-(grep("_U", tumor))]
+
+query.projected.tumor <- subset(x = query.projected, subset = sample == tumor)
+
+
+#####Figure 6: UMAP of all PDAC infiltrating TILs from Single Cell by t cell state
+png("./Figures/sce_TILS.png", height = 8, width = 10, units = "in", res = 300)
+print(DimPlot(query.projected, group.by = "functional.cluster", label = TRUE, label.size = 6, reduction = "umap", repel = TRUE, label.box = TRUE, pt.size = .5) + NoLegend() + ggtitle("Tumor Infiltrating T-cell Subsets"))
+dev.off()
+
+
+
+
+
+query.map <- data.frame(UMAP_1 = query.projected@reductions[[2]][[,1]], 
+                        UMAP_2 = query.projected@reductions[[2]][[,2]],
+                        MC_ID = query.projected@meta.data$MC_ID_3WAY,
+                        color = query.projected@meta.data$color,
+                        cluster = query.projected@meta.data$functional.cluster,
+                        cdr3_beta = query.projected@meta.data$cdr3_beta)
+
+query.map$size <- sapply(query.map$color, function(x) ifelse(is.na(x), .05, .5))
+
+query.map <- data.frame(query.map)
+
+query.map.na <- query.map %>% filter(is.na(MC_ID))
+
+query.map.T12 <- query.map %>% filter(!(is.na(MC_ID)))
+query.map.T12$barcodes <- rownames(query.map.T12)
+
+rownames(query.map.T12) <- NULL
+
+
+labels <- query.map.T12 %>% distinct(MC_ID, .keep_all = TRUE)
+
+empty_label <- query.map.T12
+empty_label$MC_ID <- NA
+empty_label <- empty_label %>% filter(!(barcodes %in% labels$barcodes))
+
+labels <- rbind(labels, empty_label)
+
+
+#####Figure 6: UMAP of all TESSA 12 shared infiltrating TILs from Single Cell by t cell state
+png("./Figures/sce_T12_MC_TIL_Overlay.png", height = 8, width = 10, units = "in", res = 300)
+print(ggplot() + 
+  geom_point(data = query.map.na, aes(x = UMAP_1, y = UMAP_2, color = color, size = size)) + 
+  geom_point(data = query.map.T12, aes(x = UMAP_1, y = UMAP_2, size = size, fill = factor(MC_ID)), shape = 21) +
+  scale_fill_manual(values = unique(query.map.T12$color))+ scale_color_manual(values = "grey0") +
+  geom_label_repel(data=labels, aes(UMAP_1,UMAP_2,label=MC_ID, fill = factor(MC_ID)), 
+                   force = 20, label.size = .5, size = 6) +
+  labs(title="Tessa 12 MetaClusters") + theme_classic() + theme(legend.position = "none") + 
+    theme(plot.title = element_text(hjust = 0.5))) 
+dev.off()
+
+
+
+freq <- DimPlot(query.projected.tumor, label = TRUE, group.by = "functional.cluster") + NoLegend()
+
+
+df <- freq$data
+rownames(df) <- NULL
+df[,c(1,2)] <- NULL
+df <- table(df)
+df <- data.frame(df)
+df$sum <- (df$Freq/sum(df$Freq))*100
+
+df <- df %>% 
+  mutate(csum = rev(cumsum(rev(sum))), 
+         pos = sum/2 + lead(csum, 1),
+         pos = if_else(is.na(pos), sum/2, pos))
+
+df$sum <- round(df$sum, digits = 2)
+
+
+query.projected.3way <- query.projected[[]]
+query.projected.3way <- query.projected.3way[!(is.na(query.projected.3way$MC_ID_3WAY)),]
+
+
+df2 <- query.projected.3way[c("functional.cluster")]
+rownames(df2) <- NULL
+df2 <- table(df2)
+df2 <- data.frame(df2)
+df2$sum <- (df2$Freq/sum(df2$Freq))*100
+
+df2 <- df2 %>% 
+  mutate(csum = rev(cumsum(rev(sum))), 
+         pos = sum/2 + lead(csum, 1),
+         pos = if_else(is.na(pos), sum/2, pos))
+
+df2$sum <- round(df2$sum, digits = 2)
+
+
+df$bulk <- "PDAC Infiltrating T-cell Subsets"
+df2$bulk <- "Tessa Cluster 12 T-cell Subsets"
+df3 <- rbind(df, df2)
+
+ df4 <- df3
+ df4 <- df4[!(df4$sum < 1),]
+
+
+
+
+pi_chart <- ggplot(df3, aes(x = "", y=sum, fill = functional.cluster)) + 
+        geom_col(width = 1, color = 1)+
+        theme_void() + coord_polar("y") + 
+        geom_label_repel(data = df4,
+                   aes(y = pos, label = paste0(sum, "%")),
+                   size = 4.5, nudge_x = 1, show.legend = FALSE) +  
+        guides(fill = guide_legend(title = "T-cell Subsets")) + facet_wrap(~bulk) + 
+        theme(strip.text.x = element_text(size = 14, vjust = 1.0))
+  
+
+#####Figure 6: pichart of all PDAC filtrating TILs from Single Cell by t cell state
+pdf(paste0("./Figures/pi_chart_TIL_STATE", ".pdf"), width = 8, height = 4)
+print(pi_chart)
+dev.off()
+
+
+
+#Fishers exact test
+
+ref <- list()
+
+for (i in 1:8) {
+
+freq <- DimPlot(query.projected.tumor, label = TRUE, group.by = "functional.cluster") + NoLegend()
+
+
+df <- freq$data
+rownames(df) <- NULL
+df[,c(1,2)] <- NULL
+df <- table(df)
+df <- data.frame(df)
+
+df2 <- query.projected.3way[c("functional.cluster")]
+rownames(df2) <- NULL
+df2 <- table(df2)
+df2 <- data.frame(df2)
+
+df3 <- merge(df, df2, by = "functional.cluster", all=TRUE)
+rownames(df3) <- df3$functional.cluster
+df3$functional.cluster <- NULL
+df3[] <- sapply(df3, function(x) ifelse(is.na(x), 0, x))
+
+
+CD8 <- df3[i,]
+df4 <- df3[-i,]
+CD8["NOT",] <- c(sum(df4$Freq.x), sum(df4$Freq.y))
+
+
+colnames(CD8) <- c("Expected", "Observed")
+
+CD8[] <- sapply(CD8, as.numeric)
+
+ref[[i]] <- fisher.test(CD8)
+
+}
+
+names(ref) <- as.character(df$functional.cluster[1:8])
+
+##3565 found in melanoma dataset
+##5616 has Tregs and has autoimmunity
+##6144 Islet-reactive CD8+ T cell frequencies in the pancreas, but not in blood, distinguish type 1 diabetic patients from healthy donors.
+##6153 found in melanoma dataset
+
+
+CDR3b_Shared <- query.projected.3way[c("cdr3_beta")]
+rownames(CDR3b_Shared) <- NULL
+CDR3b_Shared <- distinct(CDR3b_Shared)
+
+write.table(CDR3b_Shared$cdr3_beta , "CDR3b_Shared_TCRmatch.txt", sep = " ", col.names = FALSE, row.names = FALSE, quote = FALSE)
+
+
+
+```
+
+#Examine whether TESSA 12 subset can predict survival in PBMC
+```{r, PBMC_Survival_Prediction}
+# Rearrange_Summary <- read.table("/users/vikrampothuri/Documents/TCR_Graham/Inputs/PBMC_Bioidentity_TCRdist_with_subject.tsv", 
+#              sep = "\t", header = TRUE)
+
+Rearrange_Summary <- fread("/users/vikrampothuri/Documents/TCR_Graham/Inputs/PBMC_Bioidentity_TCRdist_with_subject.tsv", sep = "\t", header = TRUE, select = c(1:4))
+
+#Rearrange_Summary <- Rearrange_Summary[1:4]
+
+Rearrange_Summary <- na.omit(Rearrange_Summary)
+
+Rearrange_Summary <- Rearrange_Summary %>% group_by(subject, amino_acid) %>% 
+  summarise_at(vars(productive_frequency, templates), function(x) sum(x)) %>% ungroup()
+
+saveRDS(Rearrange_Summary , "/users/vikrampothuri/Documents/TCR_Graham/Inputs/230216_Rearrange_Summary_WashU_PBMC.rds")
+
+Rearrange_Summary <- readRDS("/users/vikrampothuri/Documents/TCR_Graham/Inputs/230216_Rearrange_Summary_WashU_PBMC.rds")
+
+T12_PBMC_merge <- Rearrange_Summary
+
+pdata <- read.csv("/users/vikrampothuri/Documents/TCR_Graham/Inputs/WashU.PBMC.csv", sep = ",", fileEncoding = "UTF-8-BOM", na.strings="")
+
+wusm_T12_dist <- TCRdist_sigMC %>% filter(DBSCAN == 13) %>% distinct (MC_ID)
+
+T12_PBMC <- TCRdist_sigMC %>% filter(MC_ID %in% wusm_T12_dist$MC_ID)
+
+
+T12_PBMC <- unique(T12_PBMC$cdr3_b_aa)
+
+T12_PBMC_merge$sigMC <- T12_PBMC_merge$amino_acid %in% T12_PBMC
+
+
+T12_PBMC_merge <- T12_PBMC_merge %>% filter(sigMC == TRUE) 
+
+
+T12_PBMC_merge <- T12_PBMC_merge %>% group_by(subject) %>% summarize_at(vars(productive_frequency), function(x) sum(x)) %>% ungroup()
+
+
+T12_PBMC_merge$subject <- gsub("-PBMC_TCRB", "", T12_PBMC_merge$subject)
+T12_PBMC_merge$subject <- as.integer(T12_PBMC_merge$subject)
+
+T12_PBMC_merge$Sample_Type <- "PBMC"
+WashU_tissue_TESSA_12$Sample_Type <- "Tissue"
+
+Combined_plot <- rbind(T12_PBMC_merge,WashU_tissue_TESSA_12)
+
+#####Supplementary Figure: Histogram of productive frequency of Tissue and PBMC
+pdf(str_glue("{OUTPUT_DIR}/TESSA_12_WashU_Histogram.pdf"))
+ggplot(Combined_plot, aes(x= productive_frequency, fill = Sample_Type)) + geom_histogram(binwidth = .0001) + labs(x = "Productive Frequency of TESSA Subest 12 TCRs", y = "Count" ) +  theme_minimal() + scale_fill_manual(values = c("#F15A29","#7570B3"))
+dev.off()
+####*
+
+#Create Discrete groups for better visualization
+Combined_plot <- Combined_plot %>% mutate(TESSA_12_group = ifelse(productive_frequency <= 0.0005, "<=0.0005",
+                                                                  ifelse(productive_frequency <= 0.001, "0.00051 - 0.001",
+                                                                         ifelse(productive_frequency <= 0.0015, "0.001 - 0.0015",
+                                                                                ifelse(productive_frequency <= 0.002, "0.0015 - 0.002",
+                                                                                ifelse(productive_frequency <= 0.0025, "0.002  - 0.0025",
+                                                                      ifelse(productive_frequency <= 0.005, "0.0026 - 0.005",
+                                                                             ifelse(productive_frequency <= 0.0075, "0.0051 - 0.0075",
+                                                                                    ifelse(productive_frequency <= 0.01, "0.0076 - 0.01",
+                                                                                           ifelse(productive_frequency > 0.01, ">0.01",NA))))))))),
+                         TESSA_12_group = factor(TESSA_12_group, levels = c("<=0.0005","0.00051 - 0.001","0.001 - 0.0015","0.0015 - 0.002","0.002  - 0.0025","0.0026 - 0.005","0.0051 - 0.0075","0.0076 - 0.01",">0.01")))
+
+table(Combined_plot$TESSA_12_group, useNA = "ifany")
+prop.table(table(Combined_plot$TESSA_12_group, useNA = "ifany"))
+                                       
+#####Supplementary Figure: Grouped Bar plot into TESSA 12 Groups by Tissue vs. PBMC
+pdf(str_glue("{OUTPUT_DIR}/TESSA_12_PBMC_Tissue_Barplot.pdf"))
+ggplot(Combined_plot, aes(fill=Sample_Type, x=TESSA_12_group)) + geom_bar(position="dodge", stat="count")  + scale_fill_manual(values = c("#F15A29","#7570B3")) + theme_minimal()+theme(axis.text.x = element_text(size=8, angle = 30))
+dev.off()
+#####*
+
+#####Supplementary Figure:Box plot - PBMC vs. Tissue
+pdf(str_glue("{OUTPUT_DIR}/TESSA_12_PBMC_Tissue_Boxplot.pdf"))
+ggplot(Combined_plot, aes(x = Sample_Type, y = productive_frequency)) +
+  geom_boxplot(aes(fill = Sample_Type), alpha = 0.2, col = "black") +
+  geom_point(aes(col = Sample_Type)) +
+  geom_line(aes(group = subject), color = "grey", alpha = .2) + theme_classic()  + stat_compare_means(method = "t.test", paired = FALSE, label.x.npc = "center", label =, size = 2) + ggtitle("TESSA 12 Productive Frequency") + theme(plot.title = element_text(hjust = 0.5), axis.title.x=element_blank(), axis.title.y=element_blank()) + scale_color_manual(values = c("#F15A29","#7570B3")) + scale_fill_manual(values = c("#F15A29","#7570B3"))
+dev.off()
+######*
+
+#Range Stats
+#PBMC
+min(subset(Combined_plot,Sample_Type == "PBMC")$productive_frequency) #min
+quantile(subset(Combined_plot,Sample_Type == "PBMC")$productive_frequency) #quartiles
+mean(subset(Combined_plot,Sample_Type == "PBMC")$productive_frequency) #mean
+median(subset(Combined_plot,Sample_Type == "PBMC")$productive_frequency) #median
+max(subset(Combined_plot,Sample_Type == "PBMC")$productive_frequency) #max
+#Tissue
+min(subset(Combined_plot,Sample_Type == "Tissue")$productive_frequency) #min
+quantile(subset(Combined_plot,Sample_Type == "Tissue")$productive_frequency) #quartiles
+mean(subset(Combined_plot,Sample_Type == "Tissue")$productive_frequency) #mean
+median(subset(Combined_plot,Sample_Type == "Tissue")$productive_frequency) #median
+max(subset(Combined_plot,Sample_Type == "Tissue")$productive_frequency) #max
+
+
+#Load in clinical data
+Clinical <- merge(pdata, T12_PBMC_merge, by.x="Sample_Name", 
+                  by.y = "subject", all.x = TRUE)
+
+Clinical$productive_frequency <- sapply(Clinical$productive_frequency, 
+                                     function(x) ifelse(is.na(x), 0, x))
+
+Clinical  <- Clinical  %>% 
+  mutate(Months = Survival/30.4167)
+
+Clinical$status <- Clinical$productive_frequency >= median(Clinical$productive_frequency)
+
+mycolors <- c("Black", "#B16548")
+
+fit <- survfit(Surv(time = Clinical$Months, event = Clinical$Deceased) 
+                 ~ status, data = Clinical)
+
+# #Original format
+# fit_surv <- ggsurvplot(fit, data = Clinical, risk.table = FALSE, surv.median.line = "hv",
+#                          pval = TRUE, pval.method = TRUE, xlab = "Months", censor = FALSE, linetype = 1, size = .3,  xlim = c(0, 100), ylim = c(0, 1), axes.offset = FALSE)$plot + scale_color_manual(values = mycolors) + theme(plot.margin = margin(1, 2, 1, 1, "cm"))
+
+#Formatted Plot
+fit_surv <- ggsurvplot(fit, data = Clinical, risk.table = TRUE, risk.table.y.text= FALSE,risk.table.fontsize = 4 , risk.table.height = .3, break.time.by = 25, surv.median.line = "hv", pval = TRUE, pval.method = TRUE, palette = mycolors, axes.offset = FALSE, xlab = "Months")
+fit_surv$table <- fit_surv$table + theme(plot.title = element_text(hjust = 0.5))
+
+#####Figure 5: Survival of WashU Patients when stratified by expression of Tessa 12 MetaCluster TCR Expression in PBMC
+pdf(paste0("/users/vikrampothuri/Documents/TCR_Graham/Figures/PBMC_Survival_Tessa12_MCs", ".pdf"))
+print(fit_surv)
+dev.off()
+
+#Calculate Hazard Ratios
+#Create temp date frame with switched levels
+surv<- Surv(Clinical$Survival/30.4167, event = Clinical$Deceased)
+#paste in from above after ~
+res.cox <- coxph(surv ~ status, data = Clinical)
+summary(res.cox)
+zphtest<-cox.zph(res.cox, terms=FALSE)
+zphtest
+#log-rank test
+log_rank <- survdiff(surv ~ status, data = Clinical)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
