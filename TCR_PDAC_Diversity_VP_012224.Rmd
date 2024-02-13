@@ -1,0 +1,1719 @@
+---
+title: "TCR_PDAC_Figures_VP"
+author: "Vikram Pothuri"
+date: "3/13/2021"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+#Setup for R environment and Java
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+# libraries
+library(dplyr)
+library(data.table)
+library(ggplot2)
+library(forcats)
+library(parallel)
+library(stringr)
+library(reshape2)
+library(igraph)
+library(stringdist)
+library(broom)
+library(GGally)
+library(ggseqlogo)
+library(network)
+library(gridExtra)
+library(cowplot)
+library(ggpubr)
+library(survival)
+library(survminer)
+library(rmarkdown)
+library(htmltools)
+library(tidyverse)
+library(scales)
+library(DT)
+library(tableone)
+library(binfotron)
+library(vegan)
+library(glmnet)
+# system resources
+CORES <- 4
+MEMORY <- "6G"
+
+# directories
+DATA_DIR <- "/Users/vikrampothuri/Documents/TCR_PDAC/Data"
+OUTPUT_DIR <- "/Users/vikrampothuri/Documents/TCR_PDAC/Output"
+```
+
+#UW Data
+```{r}
+#Read in metadata file
+df.FNF_Metadata <- fread(str_glue("{DATA_DIR}/UW/metadata.txt"))
+
+#Create data table for True Shannon Entropy
+df.True_Entropy <- data.frame(matrix(ncol=2, nrow = 0))
+colnames(df.True_Entropy) <- c("Sample_Name","True_Entropy")
+
+#Loop through each clonotype table
+for (i in 1:nrow(df.FNF_Metadata)) {
+
+  #Read in Clonotype Table
+  df.temp_table <- fread(str_glue("{DATA_DIR}/UW/{df.FNF_Metadata[i,1]}"))
+  
+  #Calculate True Shannon Entropy
+  temp_shannon <- predict_true_entropy_from_counts(df.temp_table$count, 2 , TRUE)
+  df.entry <- data.frame(df.FNF_Metadata[i,3],temp_shannon)
+  colnames(df.entry) <- c("Sample_Name","True_Entropy")
+  df.True_Entropy <- rbind(df.True_Entropy, df.entry)
+}
+df.True_Entropy$Cohort <- "UW"
+df.True_Entropy$Sample_Type <- "Tissue"
+
+#Remove surgical death and not resected from UW dataset
+#Remove 26 and C1
+df.True_Entropy <- subset(df.True_Entropy,Sample_Name != "C1")
+df.True_Entropy <- subset(df.True_Entropy,Sample_Name != "26")
+
+df.UW <- data.frame(merge(df.FNF_Metadata,df.True_Entropy, by="Sample_Name"))
+df.UW$Neoadjuvant2 <- NA
+```
+
+#Wash U Tissue Data
+```{r}
+#Read in metadata file
+df.FNF_Metadata<- fread(str_glue("{DATA_DIR}/WashU/MetaData.FNF.Tissue.txt"))
+
+#Create data table for True Shannon Entropy
+df.True_Entropy <- data.frame(matrix(ncol=2, nrow = 0))
+colnames(df.True_Entropy) <- c("Sample_Name","True_Entropy")
+
+#Loop through each clonotype table
+for (i in 1:nrow(df.FNF_Metadata)) {
+
+  #Read in Clonotype Table
+  df.temp_table <- fread(str_glue("{DATA_DIR}/WashU/{df.FNF_Metadata[i,1]}"))
+  
+  #Calculate True Shannon Entropy
+  temp_shannon <- predict_true_entropy_from_counts(df.temp_table$count, 2 , TRUE)
+  df.entry <- data.frame(df.FNF_Metadata[i,3],temp_shannon)
+  colnames(df.entry) <- c("Sample_Name","True_Entropy")
+  df.True_Entropy <- rbind(df.True_Entropy, df.entry)
+}
+
+df.True_Entropy$Cohort <- "WashU"
+df.True_Entropy$Sample_Type <- "Tissue"
+
+df.WashU.Tissue <- data.frame(merge(df.FNF_Metadata,df.True_Entropy, by="Sample_Name"))
+```
+
+#Wash U PBMC Data
+```{r}
+#Read in metadata file
+df.FNF_Metadata <- fread(str_glue("{DATA_DIR}/WashU/MetaData.FNF.PBMC.txt"))
+
+#Create data table for True Shannon Entropy
+df.True_Entropy <- data.frame(matrix(ncol=2, nrow = 0))
+colnames(df.True_Entropy) <- c("Sample_Name","True_Entropy")
+
+
+#Loop through each clonotype table
+for (i in 1:nrow(df.FNF_Metadata)) {
+
+  #Read in Clonotype Table
+  df.temp_table <- fread(str_glue("{DATA_DIR}/WashU/{df.FNF_Metadata[i,1]}"))
+  
+  #Calculate True Shannon
+  temp_shannon <- predict_true_entropy_from_counts(df.temp_table$count, 2 , TRUE)
+  df.entry <- data.frame(df.FNF_Metadata[i,3],temp_shannon)
+  colnames(df.entry) <- c("Sample_Name","True_Entropy")
+  df.True_Entropy <- rbind(df.True_Entropy, df.entry)
+}
+
+df.True_Entropy$Cohort <- "WashU"
+df.True_Entropy$Sample_Type <- "PBMC"
+
+df.WashU.PBMC <- data.frame(merge(df.FNF_Metadata,df.True_Entropy, by="Sample_Name"))
+```
+
+#TCGA Data
+```{r}
+#Read in TCGA cdr3 data
+df.TCGA_TCR <- fread(str_glue("{DATA_DIR}/TCGA/TCGA_mitcr_cdr3_result_161008.tsv"))
+df.TCGA_Clinical <- fread(str_glue("{DATA_DIR}/TCGA/clinical.tsv"))
+
+#Pull out all unique IDs from TCR df
+ids <- unique(df.TCGA_TCR$ParticipantBarcode)
+
+#Create data table for True Shannon Entropy
+df.TCGA <- data.frame(matrix(ncol=7, nrow = 0))
+colnames(df.TCGA) <- c("Sample_Name","True_Entropy","Unique_Clonotypes","Total_Abundance","True_Entropy_A","Unique_Clonotypes_A","Total_Abundance_A")
+
+
+#Loop through each clonotype table
+for (i in 1:length(ids)) {
+
+  #Read in Clonotype Table
+  df.temp_table <- subset(df.TCGA_TCR, ParticipantBarcode == ids[i])
+  
+  #Calculate True Shannon Both Types
+  temp_shannon <- predict_true_entropy_from_counts(df.temp_table$abundance, 2 , TRUE)
+  temp_Clonotypes <- nrow(df.temp_table)
+  temp_TotalAbundance <- sum(df.temp_table$abundance)
+  
+  #Calculate True Shannon A Types
+  df.temp_tableA = subset(df.temp_table,chain == "alpha")
+  temp_shannonA <- predict_true_entropy_from_counts(df.temp_tableA$abundance, 2 , TRUE)
+  temp_ClonotypesA <- nrow(df.temp_tableA)
+  temp_TotalAbundanceA <- sum(df.temp_tableA$abundance)
+  
+  #Calculate True Shannon B Types
+  df.temp_tableB = subset(df.temp_table,chain == "beta")
+  temp_shannonB <- predict_true_entropy_from_counts(df.temp_tableB$abundance, 2 , TRUE)
+  temp_ClonotypesB <- nrow(df.temp_tableB)
+  temp_TotalAbundanceB <- sum(df.temp_tableB$abundance)
+  
+  df.entry <- data.frame(ids[i],temp_shannon, temp_Clonotypes, temp_TotalAbundance, temp_shannonA, temp_ClonotypesA, temp_TotalAbundanceA,temp_shannonB, temp_ClonotypesB, temp_TotalAbundanceB)
+  colnames(df.entry) <- c("ParticipantBarcode","True_Entropy","Unique_Clonotypes","Total_Abundance","True_Entropy_A","Unique_Clonotypes_A","Total_Abundance_A", "True_Entropy_B","Unique_Clonotypes_B","Total_Abundance_B")
+  df.TCGA <- rbind(df.TCGA, df.entry)
+}
+
+df.TCGA$Cohort <- "TCGA"
+
+#Set True_Entropy to True_Entropy_B in order to do analysis on CDR3B chains
+df.TCGA$True_Entropy <- df.TCGA$True_Entropy_B
+df.TCGA$Unique_Clonotypes <- df.TCGA$Unique_Clonotypes_B
+df.TCGA$Total_Abundance <- df.TCGA$Total_Abundance_B
+```
+
+#Process WashU and UW Tables
+```{r}
+#UW
+#Remove Those Without Survival (1)
+summary(df.UW$Survival, useNA = "ifany")
+df.UW <-  df.UW[!is.na(df.UW$Survival), ]
+
+#Rename Censored
+names(df.UW)[names(df.UW) == "Censored..0.censored."] <- "Deceased"
+
+#Rename Age
+names(df.UW)[names(df.UW) == "Age.at.Surgery"] <- "Age"
+
+#Rename Sex
+names(df.UW)[names(df.UW) == "Sex..F.0..M.1."] <- "Sex"
+
+#Set Factors for Sex
+df.UW$Sex <- factor(df.UW$Sex,levels = c("0","1"))
+
+#rename Nodal Status
+names(df.UW)[names(df.UW) == "Nodal.Status"] <- "Nodal_Status"
+df.UW$Nodal_Status <- factor(df.UW$Nodal_Status,levels = c("0","1"))
+
+#Set Factors for Neoadjuvant
+df.UW$Neoadjuvant <- factor(df.UW$Neoadjuvant,levels = c("0","1"))
+
+#Create Survival Group Variable
+df.UW$Survival_Group <- if_else(df.UW$Survival > (365 * 3),"LT",
+                                                      ifelse((df.UW$Deceased == 1)
+                                                             & (df.UW$Survival <= 90),"PO",
+                                                      ifelse((df.UW$Deceased) == 1
+                                                             & (df.UW$Survival > 90)
+                                                             & (df.UW$Survival < 365), "ST",
+                                                      ifelse((df.UW$Deceased == 1)
+                                                             & (df.UW$Survival >= 365)
+                                                             & (df.UW$Survival <= (3 * 365)), "MT","S"))))
+
+#Set Factors for Survival Group
+df.UW$Survival_Group <- factor(df.UW$Survival_Group,levels = c("PO","ST","MT","LT","S"))
+
+#Add a Stage variable and fill with NA
+df.UW$Stage <- NA
+
+#Make Stage a Factor
+df.UW$Stage <- factor(df.UW$Stage,levels = c("IA","IB","IIA","IIB","III","IV"))
+
+#Wash U Tissue
+#Remove Those Without Survival
+summary(df.WashU.Tissue$Survival,useNA = "ifany")
+df.WashU.Tissue <-  df.WashU.Tissue[!is.na(df.WashU.Tissue$Survival), ]
+
+#Rename Censored
+names(df.WashU.Tissue)[names(df.WashU.Tissue) == "Censored..0.censored."] <- "Deceased"
+
+#Rename Age
+names(df.WashU.Tissue)[names(df.WashU.Tissue) == "Age.at.Surgery"] <- "Age"
+
+#Rename Sex
+names(df.WashU.Tissue)[names(df.WashU.Tissue) == "Sex..F.0..M.1."] <- "Sex"
+
+#Set Factors for Sex
+df.WashU.Tissue$Sex <- factor(df.WashU.Tissue$Sex,levels = c("0","1"))
+
+#rename Nodal Status
+names(df.WashU.Tissue)[names(df.WashU.Tissue) == "Nodal.Status"] <- "Nodal_Status"
+df.WashU.Tissue$Nodal_Status <- factor(df.WashU.Tissue$Nodal_Status,levels = c("0","1"))
+
+#Set Factors for Neoadjuvant
+df.WashU.Tissue$Neoadjuvant <- factor(df.WashU.Tissue$Neoadjuvant,levels = c("0","1"))
+
+#Create Survival Group Variable
+df.WashU.Tissue$Survival_Group <- if_else(df.WashU.Tissue$Survival > (365 * 3),"LT",
+                                                      ifelse((df.WashU.Tissue$Deceased == 1)
+                                                             & (df.WashU.Tissue$Survival <= 90),"PO",
+                                                      ifelse((df.WashU.Tissue$Deceased) == 1
+                                                             & (df.WashU.Tissue$Survival > 90)
+                                                             & (df.WashU.Tissue$Survival < 365), "ST",
+                                                      ifelse((df.WashU.Tissue$Deceased == 1)
+                                                             & (df.WashU.Tissue$Survival >= 365)
+                                                             & (df.WashU.Tissue$Survival <= (3 * 365)), "MT","S"))))
+#Set Factors for Survival Group
+df.WashU.Tissue$Survival_Group <- factor(df.WashU.Tissue$Survival_Group,levels = c("PO","ST","MT","LT","S"))
+
+#Remove Stage IV Samples (2)
+table(df.WashU.Tissue$Stage, useNA = "ifany")
+df.WashU.Tissue <- df.WashU.Tissue[!(df.WashU.Tissue$Stage == "IV"),]
+
+#Make Staging a Factor
+df.WashU.Tissue$Stage <- factor(df.WashU.Tissue$Stage,levels = c("IA","IB","IIA","IIB","III","IV"))
+
+#WashU PBMC
+#Remove Those Without Survival
+summary(df.WashU.PBMC$Survival, useNA = "ifany")
+df.WashU.PBMC <-  df.WashU.PBMC[!is.na(df.WashU.PBMC$Survival), ]
+
+#Rename Censored
+names(df.WashU.PBMC)[names(df.WashU.PBMC) == "Censored..0.censored."] <- "Deceased"
+
+#Rename Age
+names(df.WashU.PBMC)[names(df.WashU.PBMC) == "Age.at.Surgery"] <- "Age"
+
+#Rename Sex
+names(df.WashU.PBMC)[names(df.WashU.PBMC) == "Sex..F.0..M.1."] <- "Sex"
+
+#Set Factors for Sex
+df.WashU.PBMC$Sex <- factor(df.WashU.PBMC$Sex,levels = c("0","1"))
+
+#rename Nodal Status
+names(df.WashU.PBMC)[names(df.WashU.PBMC) == "Nodal.Status"] <- "Nodal_Status"
+df.WashU.PBMC$Nodal_Status <- factor(df.WashU.PBMC$Nodal_Status,levels = c("0","1"))
+
+#Set Factors for Neoadjuvant
+df.WashU.PBMC$Neoadjuvant <- factor(df.WashU.PBMC$Neoadjuvant,levels = c("0","1"))
+
+#Create Survival Group Variable
+df.WashU.PBMC$Survival_Group <- if_else(df.WashU.PBMC$Survival > (365 * 3),"LT",
+                                                      ifelse((df.WashU.PBMC$Deceased == 1)
+                                                             & (df.WashU.PBMC$Survival <= 90),"PO",
+                                                      ifelse((df.WashU.PBMC$Deceased) == 1
+                                                             & (df.WashU.PBMC$Survival > 90)
+                                                             & (df.WashU.PBMC$Survival < 365), "ST",
+                                                      ifelse((df.WashU.PBMC$Deceased == 1)
+                                                             & (df.WashU.PBMC$Survival >= 365)
+                                                             & (df.WashU.PBMC$Survival <= (3 * 365)), "MT","S"))))
+
+#Set Factors for Suvrival Group
+df.WashU.PBMC$Survival_Group <- factor(df.WashU.PBMC$Survival_Group,levels = c("PO","ST","MT","LT","S"))
+
+#Remove Stage IV Samples (4)
+table(df.WashU.PBMC$Stage, useNA = "ifany")
+df.WashU.PBMC <- df.WashU.PBMC[!(df.WashU.PBMC$Stage == "IV"),]
+
+#Make Staging a Factor
+df.WashU.PBMC$Stage <- factor(df.WashU.PBMC$Stage,levels = c("IA","IB","IIA","IIB","III","IV"))
+```
+
+#Combine TCGA True Entropy With Clinical Data
+```{r}
+#Rename So Can Bind
+names(df.TCGA_Clinical)[names(df.TCGA_Clinical) == "case_submitter_id"] <- "ParticipantBarcode"
+
+#Combine
+df.TCGA <- merge(df.TCGA_Clinical,df.TCGA, by = "ParticipantBarcode")
+```
+
+#Process TCGA Table
+```{r}
+#Add Deceased Column
+df.TCGA$Deceased <- if_else(df.TCGA$vital_status == "Dead",1,0)
+
+#Add Age column
+df.TCGA$Age <- df.TCGA$age_at_diagnosis/365
+
+#Pull all unique sample ids
+ids2 <- unique(df.TCGA$ParticipantBarcode)
+
+#Create data table for Radiation Status
+df.Radiation <- data.frame(matrix(ncol=2, nrow = 0))
+colnames(df.Radiation) <- c("PaticpantBarcode","Radiation")
+
+#Create data table for Pharm Status
+df.Pharm <- data.frame(matrix(ncol=2, nrow = 0))
+colnames(df.Radiation) <- c("PaticpantBarcode","Pharm")
+
+#Handle double entries for Radiation Therapy and Pharm Therapy
+#Loop through each unique 
+for (i in 1:length(ids)) {
+
+  #Get two rows for each sample
+  df.temp_table2 <- subset(df.TCGA, ParticipantBarcode == ids[i])
+  
+  #Radiation
+  Radiation <- subset(df.temp_table2, treatment_type == "Radiation Therapy, NOS")$treatment_or_therapy
+  df.entry <- data.frame(ids[i],Radiation)
+  colnames(df.entry) <- c("ParticipantBarcode","Radiation")
+  df.Radiation <- rbind(df.Radiation, df.entry)
+  
+  #Pharm
+  Pharm <- subset(df.temp_table2, treatment_type == "Pharmaceutical Therapy, NOS")$treatment_or_therapy
+  df.entry <- data.frame(ids[i],Pharm)
+  colnames(df.entry) <- c("ParticipantBarcode","Pharm")
+  df.Pharm <- rbind(df.Pharm, df.entry)
+}
+
+#Remove the duplicate rows for all the Radiation and Pharm entries
+df.TCGA <- subset(df.TCGA, treatment_type == "Radiation Therapy, NOS")
+
+#Remove Treatment Columns
+df.TCGA <- subset(df.TCGA, select = -c(treatment_or_therapy,treatment_type))
+
+#Merge with new treatment columns
+df.TCGA <- merge(df.TCGA,df.Radiation, by = "ParticipantBarcode")
+df.TCGA <- merge(df.TCGA,df.Pharm, by = "ParticipantBarcode")
+
+#Change Radiation to Numeric
+df.TCGA$Radiation2[df.TCGA$Radiation == "yes"] <- 1
+df.TCGA$Radiation2[df.TCGA$Radiation == "no"] <- 0
+df.TCGA$Radiation2[df.TCGA$Radiation == "not reported"] <- NA
+df.TCGA$Radiation <- df.TCGA$Radiation2
+
+#Change Pharm to Numeric
+df.TCGA$Pharm2[df.TCGA$Pharm == "yes"] <- 1
+df.TCGA$Pharm2[df.TCGA$Pharm == "no"] <- 0
+df.TCGA$Pharm2[df.TCGA$Pharm == "not reported"] <- NA
+df.TCGA$Pharm <- df.TCGA$Pharm2
+
+#Remove 2s
+df.TCGA <- subset(df.TCGA, select = -c(Radiation2,Pharm2))
+
+#Set Factors for Treatment
+df.TCGA$Pharm <- factor(df.TCGA$Pharm, levels = c("0","1"))
+df.TCGA$Radiation <- factor(df.TCGA$Radiation, levels = c("0","1"))
+
+#Create Survival Variable
+df.TCGA$Survival <- if_else (df.TCGA$Deceased == 1, as.numeric(df.TCGA$days_to_death), as.numeric(df.TCGA$days_to_last_follow_up))
+
+#Remove Those Without Survival
+summary(df.TCGA$Survival, useNA = "ifany")
+df.TCGA <-  df.TCGA[!is.na(df.TCGA$Survival), ]
+
+#Create New Nodal Status
+df.TCGA$Nodal_Status <- if_else (df.TCGA$ajcc_pathologic_n == "N0",0,
+                                     if_else (df.TCGA$ajcc_pathologic_n == "N1", 1,
+                                              if_else (df.TCGA$ajcc_pathologic_n == "N1b", 1,10)))
+df.TCGA$Nodal_Status[df.TCGA$Nodal_Status == 10] <- NA
+
+#Set Factors for Nodal_Status
+df.TCGA$Nodal_Status<- factor(df.TCGA$Nodal_Status, levels = c("0","1"))
+                     
+#Create New Sex variable
+df.TCGA$Sex <- if_else (df.TCGA$gender == "female",0,
+                                     if_else (df.TCGA$gender == "male", 1,10))
+
+#Set Factors for Sex
+df.TCGA$Sex <- factor(df.TCGA$Sex, levels = c("0","1"))
+
+#Create Survival Group Variable
+df.TCGA$Survival_Group <- if_else(df.TCGA$Survival > (365 * 3),"LT",
+                                                      ifelse((df.TCGA$Deceased == 1)
+                                                             & (df.TCGA$Survival <= 90),"PO",
+                                                      ifelse((df.TCGA$Deceased) == 1
+                                                             & (df.TCGA$Survival > 90)
+                                                             & (df.TCGA$Survival < 365), "ST",
+                                                      ifelse((df.TCGA$Deceased == 1)
+                                                             & (df.TCGA$Survival >= 365)
+                                                             & (df.TCGA$Survival <= (3 * 365)), "MT","S"))))
+
+#Set Factors for Suvrival Group
+df.TCGA$Survival_Group <- factor(df.TCGA$Survival_Group,levels = c("PO","ST","MT","LT","S"))
+
+#Rename So Can Bind
+names(df.TCGA)[names(df.TCGA) == "ParticipantBarcode"] <- "Sample_Name"
+
+#Create Neoadjuvant Variable and Fill with NA
+df.TCGA$Neoadjuvant <- NA
+
+#Create fraction_productive_of_cells Variable and Fill with NA
+df.TCGA$fraction_productive_of_cells <- NA
+
+#Create Sample Type Variable
+df.TCGA$Sample_Type <- "Tissue"
+
+#Add New Stage Variable
+df.TCGA$Stage <- substring(df.TCGA$ajcc_pathologic_stage,7)
+
+#Remove Stage IV Samples
+table(df.TCGA$Stage, useNA = "ifany")
+df.TCGA <- subset(df.TCGA,Stage != "IV")
+
+#Make Stage a Factor
+df.TCGA$Stage <- factor(df.TCGA$Stage,levels = c("IA","IB","IIA","IIB","III","IV"))
+
+```
+
+#Process Tables To Combine
+```{r}
+#Create a WashU only to study neoadjuvant2 variable
+df.WashU.Tissue2 <- df.WashU.Tissue[,c("Sample_Name","Cohort","Sex","Age","Stage","Nodal_Status","Neoadjuvant","Neoadjuvant2","Deceased","Survival","Survival_Group","Sample_Type","fraction_productive_of_cells","True_Entropy")]
+df.WashU.PBMC2 <- df.WashU.PBMC[,c("Sample_Name","Cohort","Sex","Age","Stage","Nodal_Status","Neoadjuvant","Neoadjuvant2","Deceased","Survival","Survival_Group","Sample_Type","fraction_productive_of_cells","True_Entropy")]
+df.WashU <- rbind(df.WashU.Tissue2,df.WashU.PBMC2)
+
+#UW
+df.UW <- df.UW[,c("Sample_Name","Cohort","Sex","Age","Stage","Nodal_Status","Neoadjuvant","Deceased","Survival","Survival_Group","Sample_Type","fraction_productive_of_cells","True_Entropy")]
+
+#WashU
+df.WashU.Tissue <- df.WashU.Tissue[,c("Sample_Name","Cohort","Sex","Age","Stage","Nodal_Status","Neoadjuvant","Deceased","Survival","Survival_Group","Sample_Type","fraction_productive_of_cells","True_Entropy")]
+df.WashU.PBMC <- df.WashU.PBMC[,c("Sample_Name","Cohort","Sex","Age","Stage","Nodal_Status","Neoadjuvant","Deceased","Survival","Survival_Group","Sample_Type","fraction_productive_of_cells","True_Entropy")]
+
+#TCGA
+df.TCGA <- df.TCGA[,c("Sample_Name","Cohort","Age","Sex","Stage","Nodal_Status","Neoadjuvant","Deceased","Survival","Survival_Group","Sample_Type","fraction_productive_of_cells","True_Entropy")]
+
+#Remove Incomplete Entries
+#Removes 1 patient from WashU PBMC due to missing nodal status
+#Removes 5 patients from TCGA due to missing nodal status
+#Removes 12 Additional patients from TCGA due to missing True Entropy
+df.UW <- df.UW[complete.cases(df.UW[ , c(1:4,6:13)]),]
+df.WashU.Tissue <- df.WashU.Tissue[complete.cases(df.WashU.Tissue[ , c(1:4,6:13)]),]
+df.WashU.PBMC <- df.WashU.PBMC[complete.cases(df.WashU.PBMC[ , c(1:4,6:13)]),]
+df.TCGA <- df.TCGA[complete.cases(df.TCGA[ , c(1:4,6,8:11,13)]),]
+
+#Combine 
+df.All_Cohorts <- rbind(df.UW,df.WashU.Tissue,df.WashU.PBMC,df.TCGA)
+
+#Create Cohort2 Variable to separate WashU PBMC and Tissue
+df.All_Cohorts$Cohort2 <- paste(df.All_Cohorts$Cohort,"-",df.All_Cohorts$Sample_Type)
+```
+
+#Write Output Files
+```{r}
+write.csv(df.UW,file = str_glue("{OUTPUT_DIR}/Cleaned_Data/UW.csv"))
+write.csv(df.WashU.Tissue,file = str_glue("{OUTPUT_DIR}/Cleaned_Data/WashU.Tissue.csv"))
+write.csv(df.WashU.PBMC,file = str_glue("{OUTPUT_DIR}/Cleaned_Data/WashU.PBMC.csv"))
+write.csv(df.TCGA,file = str_glue("{OUTPUT_DIR}/Cleaned_Data/TCGA.csv"))
+write.csv(df.All_Cohorts,file = str_glue("{OUTPUT_DIR}/Cleaned_Data/All.Cohorts.csv"))
+```
+
+#Create Table 1
+```{r}
+ListVars <- c("Sex","Age","Nodal_Status","Survival","Survival_Group")
+catVArs <- c()
+DataSet <- subset(df.All_Cohorts,Cohort2 %in% c("TCGA - Tissue","WashU - PBMC", "UW - Tissue"))
+table1 <- CreateTableOne(vars = ListVars, data = DataSet,factorVars = catVArs, strata = c("Cohort2"), test = TRUE)
+table1
+
+tab1 <- print(table1, quote = FALSE, noSpaces = TRUE, printToggle = FALSE)
+write.csv(tab1,file = str_glue("{OUTPUT_DIR}/table1_output.csv"))
+```
+
+#Prepare Quartile Groups For Figures
+```{r}
+df.UW_WashU.Tissue <- rbind(df.UW,df.WashU.Tissue)
+
+df.UW_WashU_TCGA.Tissue <- rbind(df.UW_WashU.Tissue,df.TCGA)
+
+#Create High Q and Low 3 Quartiles for True Shannon Entropy
+#UW and WashU - Tissue
+df.UW_WashU.Tissue$True_Entropy_quartile_groups <-ifelse(df.UW_WashU.Tissue$True_Entropy <= quantile(df.UW_WashU.Tissue$True_Entropy,na.rm=TRUE)[4],"Lower3Q","HighQ")
+df.UW_WashU.Tissue$True_Entropy_quartile_groups <- factor(df.UW_WashU.Tissue$True_Entropy_quartile_groups, levels = c("Lower3Q","HighQ"))
+
+#WashU - PBMC
+df.WashU.PBMC$True_Entropy_quartile_groups <-ifelse(df.WashU.PBMC$True_Entropy <= quantile(df.WashU.PBMC$True_Entropy,na.rm=TRUE)[4],"Lower3Q","HighQ")
+df.WashU.PBMC$True_Entropy_quartile_groups <- factor(df.WashU.PBMC$True_Entropy_quartile_groups, levels = c("Lower3Q","HighQ"))
+
+#TCGA
+df.TCGA$True_Entropy_quartile_groups <-ifelse(df.TCGA$True_Entropy <= quantile(df.TCGA$True_Entropy,na.rm=TRUE)[4],"Lower3Q","HighQ")
+df.TCGA$True_Entropy_quartile_groups <- factor(df.TCGA$True_Entropy_quartile_groups, levels = c("Lower3Q","HighQ"))
+
+#All Tissue
+df.UW_WashU_TCGA.Tissue$True_Entropy_quartile_groups <-ifelse(df.UW_WashU_TCGA.Tissue$True_Entropy <= quantile(df.UW_WashU_TCGA.Tissue$True_Entropy,na.rm=TRUE)[4],"Lower3Q","HighQ")
+df.UW_WashU_TCGA.Tissue$True_Entropy_quartile_groups <- factor(df.UW_WashU_TCGA.Tissue$True_Entropy_quartile_groups, levels = c("Lower3Q","HighQ"))
+
+#Create above and below median groups for Fraction T Cells
+#UW and WashU - Tissue
+df.UW_WashU.Tissue$Fraction_T_Cells_Group <- ifelse(df.UW_WashU.Tissue$fraction_productive_of_cells <= median(df.UW_WashU.Tissue$fraction_productive_of_cells),"Below Median","Above Median")
+df.UW_WashU.Tissue$Fraction_T_Cells_Group <- factor(df.UW_WashU.Tissue$Fraction_T_Cells_Group,levels = c("Below Median", "Above Median"))
+
+#WashU - PBMC
+df.WashU.PBMC$Fraction_T_Cells_Group <- ifelse(df.WashU.PBMC$fraction_productive_of_cells <= median(df.WashU.PBMC$fraction_productive_of_cells),"Below Median","Above Median")
+df.WashU.PBMC$Fraction_T_Cells_Group <- factor(df.WashU.PBMC$Fraction_T_Cells_Group,levels = c("Below Median", "Above Median"))
+```
+
+#Figure 1: PBMC vs. Tissue Diversity Comparison and Survival Group Box Plots
+```{r}
+#Read in Downsample 5000 file
+DS_5000 <- fread(str_glue("{DATA_DIR}/Shannon_Simpson/All.diversity_stats_combined_5000.csv"))
+
+#Select only columns we want
+DS_5000_Tissue <- subset(DS_5000,
+                  select = c("Patient","shannonWienerIndex_mean.Tissue","inverseSimpsonIndex_mean.Tissue"))
+
+#Rename so we can merge
+names(DS_5000_Tissue)[names(DS_5000_Tissue) == "Patient"] <- "Sample_Name"
+names(DS_5000_Tissue)[names(DS_5000_Tissue) == "shannonWienerIndex_mean.Tissue"] <- "Shannon_Index"
+names(DS_5000_Tissue)[names(DS_5000_Tissue) == "inverseSimpsonIndex_mean.Tissue"] <- "Inverse_Simpson_Index"
+
+DS_5000_Tissue$Sample_Type <- "Tissue"
+
+#Select only columns we want
+DS_5000_PBMC <- subset(DS_5000,
+                  select = c("Patient","shannonWienerIndex_mean.PBMC","inverseSimpsonIndex_mean.PBMC"))
+
+#Rename so we can merge
+names(DS_5000_PBMC)[names(DS_5000_PBMC) == "Patient"] <- "Sample_Name"
+names(DS_5000_PBMC)[names(DS_5000_PBMC) == "shannonWienerIndex_mean.PBMC"] <- "Shannon_Index"
+names(DS_5000_PBMC)[names(DS_5000_PBMC) == "inverseSimpsonIndex_mean.PBMC"] <- "Inverse_Simpson_Index"
+
+DS_5000_PBMC$Sample_Type <- "PBMC"
+
+#Create dataframe with tissue and pbmc combined but each with individual row
+DS_5000_All <- rbind(DS_5000_Tissue,DS_5000_PBMC)
+
+#Merge with WashU that contains clinical info and true entropy
+DS_5000_Combined <- merge(df.WashU,DS_5000_All, by = c("Sample_Name","Sample_Type"))
+
+#Make sure same number of rows
+nrow(DS_5000_Combined)
+nrow(df.WashU.Tissue)
+
+#Create dataframe for combined plot - only include those who are in the tissue data frame
+Combined_plot <- subset(DS_5000_Combined, Sample_Name %in% df.WashU.Tissue$Sample_Name)
+nrow(Combined_plot)
+#Remove 8 Tissue Samples without Shannon or Simpson because of low clonotype count (from outside analysis)
+summary(Combined_plot$Shannon_Index, useNA = "ifany")
+
+Removals <- subset(Combined_plot,is.na(Shannon_Index))$Sample_Name
+
+Combined_plot <- subset(Combined_plot,!(Sample_Name %in% Removals))
+nrow(Combined_plot)
+#Down to 216 - removed the 8 tissue missing and their corresponding PBMCs
+
+#Panels A-C
+#True Entropy, Tissue vs. PBMC
+pdf(str_glue("{OUTPUT_DIR}/True_Entropy_Paired.pdf"), height = 4, width = 3.5)
+print(ggplot(Combined_plot, aes(x = Sample_Type, y = True_Entropy)) +
+  geom_boxplot(aes(fill = Sample_Type), alpha = 0.2, col = "black") +
+  geom_point(aes(col = Sample_Type)) +
+  geom_line(aes(group = Sample_Name), color = "grey", alpha = .2) + theme_classic() + stat_compare_means(method = "t.test", 
+  paired = TRUE, label.x.npc = "center", label =, size = 2) +
+  ggtitle("True Entropy") + theme(plot.title = element_text(hjust = 0.5), axis.title.x=element_blank(), axis.title.y=element_blank()) + scale_color_manual(values = c("#F15A29","#7570B3")) + scale_fill_manual(values = c("#F15A29","#7570B3")))
+dev.off()
+
+#Shannon Index, Tissue vs. PBMC
+pdf(str_glue("{OUTPUT_DIR}/Shannon_Weiner_Index_Paired.pdf"), height = 4, width = 3.5)
+print(ggplot(Combined_plot, aes(x = Sample_Type, y = Shannon_Index)) +
+  geom_boxplot(aes(fill = Sample_Type), alpha = 0.2, col = "black") +
+  geom_point(aes(col = Sample_Type)) +
+  geom_line(aes(group = Sample_Name), color = "grey", alpha = .2) + theme_classic() + stat_compare_means(method = "t.test", 
+    paired = TRUE, label.x.npc = "center", label =, size = 2) +
+    ggtitle("Shannon Weiner Index") + theme(plot.title = element_text(hjust = 0.5), axis.title.x=element_blank(), axis.title.y=element_blank()) + scale_color_manual(values = c("#F15A29","#7570B3")) + scale_fill_manual(values = c("#F15A29","#7570B3")))
+dev.off()
+
+#Shannon Index, Tissue vs. PBMC
+pdf(str_glue("{OUTPUT_DIR}/Inverse_Simpson_Index_Paired.pdf"), height = 4, width = 3.5)
+print(ggplot(Combined_plot, aes(x = Sample_Type, y = Inverse_Simpson_Index)) +
+  geom_boxplot(aes(fill = Sample_Type), alpha = 0.2, col = "black") +
+  geom_point(aes(col = Sample_Type)) +
+  geom_line(aes(group = Sample_Name), color = "grey", alpha = .2) + theme_classic() + stat_compare_means(method = "t.test", 
+    paired = TRUE, label.x.npc = "center", label =, size = 2) +
+    ggtitle("Inverse Simpson Index") + theme(plot.title = element_text(hjust = 0.5), axis.title.x=element_blank(), axis.title.y=element_blank()) + scale_color_manual(values = c("#F15A29","#7570B3")) + scale_fill_manual(values = c("#F15A29","#7570B3")))
+dev.off()
+
+### Panels D-F
+#PBMC
+#Read in Downsample 10000 file
+DS_10000 <- fread(str_glue("{DATA_DIR}/Shannon_Simpson/All.diversity_stats_combined_10000.csv"))
+
+#Select only columns we want
+DS_10000_PBMC <- subset(DS_10000,
+                  select = c("Patient","shannonWienerIndex_mean.PBMC","inverseSimpsonIndex_mean.PBMC"))
+
+#Rename so we can merge
+names(DS_10000_PBMC)[names(DS_10000_PBMC) == "Patient"] <- "Sample_Name"
+names(DS_10000_PBMC)[names(DS_10000_PBMC) == "shannonWienerIndex_mean.PBMC"] <- "Shannon_Index"
+names(DS_10000_PBMC)[names(DS_10000_PBMC) == "inverseSimpsonIndex_mean.PBMC"] <- "Inverse_Simpson_Index"
+
+#Create dataframe for PBMC plot - only include those who are in the PBMC data frame
+PBMC_plot <- merge(df.WashU.PBMC,DS_10000_PBMC, by = "Sample_Name")
+nrow(df.WashU.PBMC)
+nrow(PBMC_plot)
+summary(df.WashU.PBMC$True_Entropy, useNA = "ifany")
+summary(PBMC_plot$True_Entropy, useNA = "ifany")
+summary(PBMC_plot$Shannon_Index, useNA = "ifany")
+summary(PBMC_plot$Inverse_Simpson_Index, useNA = "ifany")
+
+#No missing PBMC - full 152
+PBMC_plot$Survival_Group <- factor(PBMC_plot$Survival_Group, levels = c("LT","MT","ST","PO","S"))
+
+my_comparisons <- list(c("ST","MT"),c("ST","LT"),c("MT","LT"))
+
+#True_Entropy
+pdf(str_glue("{OUTPUT_DIR}/WashUPBMC_Survival_Group_True_Entropy.pdf"), height = 4, width = 4)
+print(ggplot(subset(PBMC_plot, Survival_Group %in% c("ST","MT","LT")),aes_string(x = "Survival_Group", y = "True_Entropy", group = "Survival_Group", fill = "Survival_Group")) + geom_boxplot() + stat_compare_means(method = "t.test", paired = FALSE, comparisons = my_comparisons) + stat_compare_means(method = "anova") + ggtitle("WashU - PBMC - True Entropy") + theme_classic() + theme(plot.title = element_text(hjust = 0.5), axis.title.x=element_blank(), axis.title.y=element_blank()) + scale_color_manual(values = c("#8DD3C7","#FFFFB3","#80B1D3")) + scale_fill_manual(values = c("#8DD3C7","#FFFFB3","#80B1D3")))
+dev.off()
+
+#Shannon
+pdf(str_glue("{OUTPUT_DIR}/WashUPBMC_Survival_Group_Shannon.pdf"), height = 4, width = 4)
+print(ggplot(subset(PBMC_plot, Survival_Group %in% c("ST","MT","LT")),aes_string(x = "Survival_Group", y = "Shannon_Index", group = "Survival_Group", fill = "Survival_Group")) + geom_boxplot() + stat_compare_means(method = "t.test", paired = FALSE, comparisons = my_comparisons) + stat_compare_means(method = "anova") + ggtitle("WashU - PBMC - Shannon Index") + theme_classic() + theme(plot.title = element_text(hjust = 0.5), axis.title.x=element_blank(), axis.title.y=element_blank()) + scale_color_manual(values = c("#8DD3C7","#FFFFB3","#80B1D3")) + scale_fill_manual(values = c("#8DD3C7","#FFFFB3","#80B1D3")))
+dev.off()
+
+#Simpson
+pdf(str_glue("{OUTPUT_DIR}/WashUPBMC_Survival_Group_Simpson.pdf"), height = 4, width = 4)
+print(ggplot(subset(PBMC_plot, Survival_Group %in% c("ST","MT","LT")),aes_string(x = "Survival_Group", y = "Inverse_Simpson_Index", group = "Survival_Group", fill = "Survival_Group")) + geom_boxplot() + stat_compare_means(method = "t.test", paired = FALSE, comparisons = my_comparisons) + stat_compare_means(method = "anova") + ggtitle("WashU - PBMC - Simpson Index") + theme_classic() + theme(plot.title = element_text(hjust = 0.5), axis.title.x=element_blank(), axis.title.y=element_blank()) + scale_color_manual(values = c("#8DD3C7","#FFFFB3","#80B1D3")) + scale_fill_manual(values = c("#8DD3C7","#FFFFB3","#80B1D3")))
+dev.off()
+
+#N values
+table(PBMC_plot$Survival_Group, useNA = "ifany")
+
+#ANOVA testing
+compare_means(True_Entropy~Survival_Group, method ='anova',data = subset(PBMC_plot, Survival_Group %in% c("ST","MT","LT")))
+compare_means(Shannon_Index~Survival_Group, method ='anova',data = subset(PBMC_plot, Survival_Group %in% c("ST","MT","LT")))
+compare_means(Inverse_Simpson_Index~Survival_Group, method ='anova',data = subset(PBMC_plot, Survival_Group %in% c("ST","MT","LT")))
+
+#Tests with FDR correction
+compare_means(True_Entropy~Survival_Group,comparisons = my_comparisons, p.adjust.method = "fdr",  method ='t.test',data = subset(PBMC_plot, Survival_Group %in% c("ST","MT","LT")))
+compare_means(Shannon_Index~Survival_Group,comparisons = my_comparisons, p.adjust.method = "fdr",  method ='t.test',data = subset(PBMC_plot, Survival_Group %in% c("ST","MT","LT")))
+compare_means(Inverse_Simpson_Index~Survival_Group,comparisons = my_comparisons, p.adjust.method = "fdr",  method ='t.test',data = subset(PBMC_plot, Survival_Group %in% c("ST","MT","LT")))
+
+### Panels G-I
+#Tissue Shannon and Simpson by Survival Group
+Tissue_plot <- subset(Combined_plot, Sample_Type == "Tissue")
+table(Tissue_plot$Survival_Group, useNA = "ifany")
+
+Tissue_plot$Survival_Group <- factor(Tissue_plot$Survival_Group, levels = c("LT","MT","ST","PO","S"))
+
+my_comparisons <- list(c("ST","MT"),c("ST","LT"),c("MT","LT"))
+
+tmp <- df.WashU.Tissue
+tmp$Survival_Group <- factor(tmp$Survival_Group, levels = c("LT","MT","ST","PO","S"))
+table(tmp$Survival_Group, useNA = "ifany")
+
+#Wash U Tissue - Using the full cohort (116 patients total - 81 in the survival groups)
+pdf(str_glue("{OUTPUT_DIR}/WashUTissue_Survival_Group_TrueE_Full_Cohort.pdf"), height = 4, width = 4)
+print(ggplot(subset(tmp, Survival_Group %in% c("ST","MT","LT")),aes_string(x = "Survival_Group", y = "True_Entropy", group = "Survival_Group", fill = "Survival_Group")) + geom_boxplot() + stat_compare_means(method = "t.test", paired = FALSE, comparisons = my_comparisons) + stat_compare_means(method = "anova") + ggtitle("WashU - Tissue") + theme_classic() + theme(plot.title = element_text(hjust = 0.5), axis.title.x=element_blank(), axis.title.y=element_blank()) + scale_color_manual(values = c("#8DD3C7","#FFFFB3","#80B1D3")) + scale_fill_manual(values = c("#8DD3C7","#FFFFB3","#80B1D3")))
+dev.off()
+
+#One way ANOVA testing
+compare_means(True_Entropy~Survival_Group, method ='anova',data = subset(tmp, Survival_Group %in% c("ST","MT","LT")))
+
+#Adjusted p values
+compare_means(True_Entropy~Survival_Group,comparisons = my_comparisons, p.adjust.method = "fdr",  method ='t.test',data = subset(tmp, Survival_Group %in% c("ST","MT","LT")))
+
+#Shannon
+pdf(str_glue("{OUTPUT_DIR}/WashUTissue_Survival_Group_Shannon.pdf"), height = 4, width = 4)
+print(ggplot(subset(Tissue_plot, Survival_Group %in% c("ST","MT","LT")),aes_string(x = "Survival_Group", y = "Shannon_Index", group = "Survival_Group", fill = "Survival_Group")) + geom_boxplot() +stat_compare_means(method = "t.test", paired = FALSE, comparisons = my_comparisons) + stat_compare_means(method = "anova") + ggtitle("WashU - Tissue - Shannon Index") + theme_classic() + theme(plot.title = element_text(hjust = 0.5), axis.title.x=element_blank(), axis.title.y=element_blank()) + scale_color_manual(values = c("#8DD3C7","#FFFFB3","#80B1D3")) + scale_fill_manual(values = c("#8DD3C7","#FFFFB3","#80B1D3")))
+dev.off()
+
+#Simpson
+pdf(str_glue("{OUTPUT_DIR}/WashUTissue_Survival_Group_Simpson.pdf"), height = 4, width = 4)
+print(ggplot(subset(Tissue_plot, Survival_Group %in% c("ST","MT","LT")),aes_string(x = "Survival_Group", y = "Inverse_Simpson_Index", group = "Survival_Group", fill = "Survival_Group")) + geom_boxplot() +stat_compare_means(method = "t.test", paired = FALSE, comparisons = my_comparisons) + stat_compare_means(method = "anova") + ggtitle("WashU - Tissue - Inverse Simpson Index") + theme_classic() + theme(plot.title = element_text(hjust = 0.5), axis.title.x=element_blank(), axis.title.y=element_blank()) + scale_color_manual(values = c("#8DD3C7","#FFFFB3","#80B1D3")) + scale_fill_manual(values = c("#8DD3C7","#FFFFB3","#80B1D3")))
+dev.off()
+
+#N values
+table(Tissue_plot$Survival_Group, useNA = "ifany")
+summary(Tissue_plot$Shannon_Index, useNA = "ifany")
+summary(Tissue_plot$Inverse_Simpson_Index, useNA = "ifany")
+
+#ANOVA testing
+compare_means(Shannon_Index~Survival_Group, method ='anova',data = subset(Tissue_plot, Survival_Group %in% c("ST","MT","LT")))
+compare_means(Inverse_Simpson_Index~Survival_Group, method ='anova',data = subset(Tissue_plot, Survival_Group %in% c("ST","MT","LT")))
+
+#Tests with FDR if needed in the future
+compare_means(Shannon_Index~Survival_Group,comparisons = my_comparisons, p.adjust.method = "fdr",  method ='t.test',data = subset(Tissue_plot, Survival_Group %in% c("ST","MT","LT")))
+compare_means(Inverse_Simpson_Index~Survival_Group,comparisons = my_comparisons, p.adjust.method = "fdr",  method ='t.test',data = subset(Tissue_plot, Survival_Group %in% c("ST","MT","LT")))
+```
+
+#Figure 2. Multivariate Cox Regression for Survival
+```{r}
+#A/B
+res.cox <- coxph(Surv(time = df.UW_WashU.Tissue$Survival/30.4167, event = df.UW_WashU.Tissue$Deceased)~ Age+Nodal_Status+Neoadjuvant+True_Entropy_quartile_groups+Fraction_T_Cells_Group, data = df.UW_WashU.Tissue)
+summary(res.cox)
+ggsurvplot(survfit(res.cox,data = df.UW_WashU.Tissue), palette = "#2E9FDF",
+           ggtheme = theme_minimal()+theme(plot.title = element_text(hjust = 0.5)), title = "Multivariate Cox")
+
+#Testing to if True Entropy Quartile Group alone has a difference in survival
+Test_df <- with(df.UW_WashU.Tissue,
+               data.frame(True_Entropy_quartile_groups = c("Lower3Q","HighQ"), 
+                        Age = rep(mean(Age, na.rm = TRUE), 2),
+                        Fraction_T_Cells_Group = rep(as.factor("Below Median"), 2),
+                        Nodal_Status = rep(as.factor(1), 2),
+                        Neoadjuvant = rep(as.factor(0), 2)
+                          )
+               )
+Test_df
+fit <- survfit(res.cox, data = df.UW_WashU.Tissue, newdata = Test_df)
+a1 <- ggsurvplot(fit, conf.int = FALSE, legend.labs=c("Lower 3 Quartiles - True Entropy", "Upper Quartile - True Entropy"),
+           palette = c("#377EB8","#E41A1C"), surv.median.line = "hv",axes.offset = FALSE, ggtheme = theme(plot.title = element_text(hjust = 0.5, size = 20),
+                                                               legend.text = element_text(size = 12.5),
+                                                               axis.text.x = element_text(size = 12.5),
+                                                               axis.text.y = element_text(size = 12.5),
+                                                               axis.title.x = element_text(size = 12.5),
+                                                               axis.title.y = element_text(size = 12.5),
+                                                               axis.line = element_line(color='black'),
+                                                               panel.background = element_rect(color = "white", fill = "white"),
+                                                               panel.grid.major = element_blank(),
+                                                               panel.grid.minor = element_blank(),
+                                                               panel.border = element_blank()), 
+                                                               title = "UW and WashU - Tissue")
+
+output <- summary(res.cox)
+write.csv(data.frame(n = output$n, nevent = output$nevent, output$concordance),file = str_glue("{OUTPUT_DIR}/N_3a.csv"))
+write.csv(data.frame(output$coefficients,output$conf.int),file = str_glue("{OUTPUT_DIR}/Coefficients_3a.csv"))
+
+#Testing to if Fraction T cells alone has a difference in survival
+Test_df <- with(df.UW_WashU.Tissue,
+               data.frame(Fraction_T_Cells_Group = c("Below Median","Above Median"), 
+                        Age = rep(mean(Age, na.rm = TRUE), 2),
+                        True_Entropy_quartile_groups = rep(as.factor("Lower3Q"), 2),
+                        Nodal_Status = rep(as.factor(1), 2),
+                        Neoadjuvant = rep(as.factor(0), 2)
+                          )
+               )
+Test_df
+fit <- survfit(res.cox, data = df.UW_WashU.Tissue, newdata = Test_df)
+a2 <- ggsurvplot(fit, conf.int = FALSE, legend.labs=c("Below Median - Fraction T Cells", "Above Median - Fraction T Cells"),
+           palette = c("#377EB8","#E41A1C"), surv.median.line = "hv",axes.offset = FALSE, ggtheme = theme_minimal()+theme(plot.title = element_text(hjust = 0.5, size = 20),
+                                                               legend.text = element_text(size = 12.5),
+                                                               axis.text.x = element_text(size = 12.5),
+                                                               axis.text.y = element_text(size = 12.5),
+                                                               axis.title.x = element_text(size = 12.5),
+                                                               axis.title.y = element_text(size = 12.5),
+                                                               axis.line = element_line(color='black'),
+                                                               panel.background = element_rect(color = "white", fill = "white"),
+                                                               panel.grid.major = element_blank(),
+                                                               panel.grid.minor = element_blank(),
+                                                               panel.border = element_blank()), 
+                                                               title = "UW and WashU - Tissue")
+#Create Variables for Forest Plot
+tempData <- data.frame(output$coefficients)
+Variables <- rownames(tempData)
+Effect <- tempData$exp.coef.
+tempData <- data.frame(output$conf.int)
+ci_l <- tempData$lower..95
+ci_u <- tempData$upper..95
+Model <- rep("UW and WashU - Tissue",nrow(tempData))
+
+#C/D
+res.cox <- coxph(Surv(time = df.WashU.PBMC$Survival/30.4167, event = df.WashU.PBMC$Deceased)~ Age+Nodal_Status+Neoadjuvant+True_Entropy_quartile_groups+Fraction_T_Cells_Group, data = df.WashU.PBMC)
+summary(res.cox)
+ggsurvplot(survfit(res.cox,data = df.WashU.PBMC), palette = "#2E9FDF",
+           ggtheme = theme_minimal()+theme(plot.title = element_text(hjust = 0.5)), title = "Multivariate Cox")
+
+#Testing to if True Entropy Quartile Group alone has a difference in survival
+Test_df <- with(df.WashU.PBMC,
+               data.frame(True_Entropy_quartile_groups = c("Lower3Q","HighQ"), 
+                        Age = rep(mean(Age, na.rm = TRUE), 2),
+                        Fraction_T_Cells_Group = rep(as.factor("Below Median"), 2),
+                        Nodal_Status = rep(as.factor(1), 2),
+                        Neoadjuvant = rep(as.factor(0), 2)
+                          )
+               )
+Test_df
+fit <- survfit(res.cox, data = df.WashU.PBMC, newdata = Test_df)
+b1 <- ggsurvplot(fit, conf.int = FALSE, legend.labs=c("Lower 3 Quartiles - True Entropy", "Upper Quartile - True Entropy"),
+           palette = c("#377EB8","#E41A1C"), surv.median.line = "hv",axes.offset = FALSE, ggtheme = theme_minimal()+theme(plot.title = element_text(hjust = 0.5, size = 20),
+                                                               legend.text = element_text(size = 12.5),
+                                                               axis.text.x = element_text(size = 12.5),
+                                                               axis.text.y = element_text(size = 12.5),
+                                                               axis.title.x = element_text(size = 12.5),
+                                                               axis.title.y = element_text(size = 12.5),
+                                                               axis.line = element_line(color='black'),
+                                                               panel.background = element_rect(color = "white", fill = "white"),
+                                                               panel.grid.major = element_blank(),
+                                                               panel.grid.minor = element_blank(),
+                                                               panel.border = element_blank()),
+                                                               title = "WashU - PBMC")
+
+output <- summary(res.cox)
+write.csv(data.frame(n = output$n, nevent = output$nevent, output$concordance),file = str_glue("{OUTPUT_DIR}/N_3b.csv"))
+write.csv(data.frame(output$coefficients,output$conf.int),file = str_glue("{OUTPUT_DIR}/Coefficients_3b.csv"))
+
+#Testing to if Fraction T cells alone has a difference in survival
+Test_df <- with(df.WashU.PBMC,
+               data.frame(Fraction_T_Cells_Group = c("Below Median","Above Median"), 
+                        Age = rep(mean(Age, na.rm = TRUE), 2),
+                        True_Entropy_quartile_groups = rep(as.factor("Lower3Q"), 2),
+                        Nodal_Status = rep(as.factor(1), 2),
+                        Neoadjuvant = rep(as.factor(0), 2)
+                          )
+               )
+Test_df
+fit <- survfit(res.cox, data = df.WashU.PBMC, newdata = Test_df)
+b2 <- ggsurvplot(fit, conf.int = FALSE, legend.labs=c("Below Median - Fraction T Cells", "Above Median - Fraction T Cells"),
+           palette = c("#377EB8","#E41A1C"), surv.median.line = "hv",axes.offset = FALSE, ggtheme = theme_minimal()+theme(plot.title = element_text(hjust = 0.5, size = 20),
+                                                               legend.text = element_text(size = 12.5),
+                                                               axis.text.x = element_text(size = 12.5),
+                                                               axis.text.y = element_text(size = 12.5),
+                                                               axis.title.x = element_text(size = 12.5),
+                                                               axis.title.y = element_text(size = 12.5),
+                                                               axis.line = element_line(color='black'),
+                                                               panel.background = element_rect(color = "white", fill = "white"),
+                                                               panel.grid.major = element_blank(),
+                                                               panel.grid.minor = element_blank(),
+                                                               panel.border = element_blank()),
+                                                               title = "WashU - PBMC")
+
+#Create Variables for Forest Plot
+tempData <- data.frame(output$coefficients)
+Variables <- append(Variables, rownames(tempData))
+Effect <- append(Effect,tempData$exp.coef.)
+tempData <- data.frame(output$conf.int)
+ci_l <- append(ci_l,tempData$lower..95)
+ci_u <- append(ci_u,tempData$upper..95)
+Model <- append(Model,rep("WashU - PBMC",nrow(tempData)))
+
+#E
+res.cox <- coxph(Surv(time = df.TCGA$Survival/30.4167, event = df.TCGA$Deceased)~ Age+Nodal_Status+True_Entropy_quartile_groups, data = df.TCGA)
+summary(res.cox)
+ggsurvplot(survfit(res.cox,data = df.TCGA), palette = "#2E9FDF",
+           ggtheme = theme_minimal()+theme(plot.title = element_text(hjust = 0.5)), title = "Multivariate Cox")
+
+#Testing to if True Entropy Quartile Groups alone has a difference in survival
+Test_df <- with(df.TCGA,
+               data.frame(True_Entropy_quartile_groups = c("Lower3Q","HighQ"), 
+                        Age = rep(mean(Age, na.rm = TRUE), 2),
+                        Nodal_Status = rep(as.factor(1), 2)
+                          )
+               )
+Test_df
+fit <- survfit(res.cox, data = df.TCGA, newdata = Test_df)
+c1 <- ggsurvplot(fit, conf.int = FALSE, legend.labs=c("Lower 3 Quartiles - True Entropy", "Upper Quartile - True Entropy"),
+           palette = c("#377EB8","#E41A1C"), surv.median.line = "hv",axes.offset = FALSE, ggtheme = theme_minimal()+theme(plot.title = element_text(hjust = 0.5, size = 20),
+                                                               legend.text = element_text(size = 12.5),
+                                                               axis.text.x = element_text(size = 12.5),
+                                                               axis.text.y = element_text(size = 12.5),
+                                                               axis.title.x = element_text(size = 12.5),
+                                                               axis.title.y = element_text(size = 12.5),
+                                                               axis.line = element_line(color='black'),
+                                                               panel.background = element_rect(color = "white", fill = "white"),
+                                                               panel.grid.major = element_blank(),
+                                                               panel.grid.minor = element_blank(),
+                                                               panel.border = element_blank()),
+                                                               title = "TCGA - Tissue")
+
+output <- summary(res.cox)
+write.csv(data.frame(n = output$n, nevent = output$nevent, output$concordance),file = str_glue("{OUTPUT_DIR}/N_3c.csv"))
+write.csv(data.frame(output$coefficients,output$conf.int),file = str_glue("{OUTPUT_DIR}/Coefficients_3c.csv"))
+
+
+#Create Variables for Forest Plot
+tempData <- data.frame(output$coefficients)
+Variables <- append(Variables, rownames(tempData))
+Effect <- append(Effect,tempData$exp.coef.)
+tempData <- data.frame(output$conf.int)
+ci_l <- append(ci_l,tempData$lower..95)
+ci_u <- append(ci_u,tempData$upper..95)
+Model <- append(Model,rep("TCGA - Tissue",nrow(tempData)))
+
+#3d. Forest Plot Summarizing Data
+df.Forest_Plot <- data.frame(Variables, Effect, ci_l, ci_u, Model)
+
+#Rename Variables
+df.Forest_Plot$Variables <- ifelse(df.Forest_Plot$Variables == "Nodal_Status1","Positive Nodal Status",
+                                   ifelse(df.Forest_Plot$Variables == "Neoadjuvant1", "Neoadjuvant Therapy",
+                                    ifelse(df.Forest_Plot$Variables == "True_Entropy_quartile_groupsHighQ", "Upper Quartile - True Entropy",
+                                           ifelse(df.Forest_Plot$Variables == "Fraction_T_Cells_GroupAbove Median","Above Median - Fraction T Cells",
+                                                  ifelse(df.Forest_Plot$Variables == "Age", "Age","--")))))
+
+#Set Factors for Sex
+df.Forest_Plot$Variables <- factor(df.Forest_Plot$Variables,levels = c("Age","Positive Nodal Status", "Neoadjuvant Therapy", "Upper Quartile - True Entropy", "Above Median - Fraction T Cells"))
+
+#Reorder By Variables
+df.Forest_Plot <- rbind(subset(df.Forest_Plot, Variables == "Age"), subset(df.Forest_Plot, Variables == "Positive Nodal Status"), subset(df.Forest_Plot, Variables == "Neoadjuvant Therapy"), subset(df.Forest_Plot, Variables == "Upper Quartile - True Entropy"), subset(df.Forest_Plot, Variables == "Above Median - Fraction T Cells"))
+
+#Create Index Variable
+#df.Forest_Plot$Index <- c(1,4,7,9,12,2,5,8,10,13,3,6,11)
+
+for (i in 1:nrow(df.Forest_Plot)) {
+   df.Forest_Plot$Index[i] <- i
+ }
+
+#just some code to format the x-axis label
+xname <- "Hazard Ratio"
+
+#setting up the basic plot
+p <- ggplot(data=df.Forest_Plot, aes(y=Index, x=Effect, xmin=ci_l, xmax=ci_u))+ 
+
+#this adds the effect sizes to the plot
+geom_point()+ 
+
+#this changes the features of the overall effects
+#one could resize, reshape, or recolor these points if desired
+# geom_point(data=subset(df.Forest_Plot, Comparison=="All"), color="Black", size=2)+ 
+
+#adds the CIs
+geom_errorbarh(height=.5)+
+
+#sets the scales
+#note that I reverse the y axis to correctly order the effect #sizes based on my index variable
+scale_x_continuous(limits=c(0,4), name=xname)+
+scale_y_continuous(name = "", breaks=1:13, labels = df.Forest_Plot$Model, trans = "reverse")+
+
+#adding a vertical line at the effect = 0 mark
+geom_vline(xintercept=1, color="black", linetype="dashed", alpha=.5)+
+
+#faceting based on my subgroups
+facet_grid(Variables~., scales= "free", space="free")+
+
+#thematic stuff
+ggtitle("")+
+theme_minimal()+
+theme(text=element_text(family="Times",size=16, color="black"))+
+theme(panel.spacing = unit(2, "lines"))
+
+p
+
+pdf(str_glue("{OUTPUT_DIR}/3.pdf"))
+print(a1)
+print(a2)
+print(b1)
+print(b2)
+print(c1)
+print(p)
+dev.off()
+```
+
+#Testing Proportion Hazards Assumptions
+```{r}
+#A/B
+res.cox <- coxph(Surv(time = df.UW_WashU.Tissue$Survival/30.4167, event = df.UW_WashU.Tissue$Deceased)~ Age+Nodal_Status+Neoadjuvant+True_Entropy_quartile_groups+Fraction_T_Cells_Group, data = df.UW_WashU.Tissue)
+summary(res.cox)
+
+#Testing Proportional Hazards Assumption
+test.ph <- cox.zph(res.cox)
+test.ph
+#ggcoxzph(test.ph)
+#plot(test.ph)
+
+Age_adjusted <- df.UW_WashU.Tissue
+Age_adjusted <- mutate(Age_adjusted,
+                       Age_cat = factor(ntile(Age,2)))
+table(Age_adjusted$Age_cat)
+
+#C/D
+res.cox <- coxph(Surv(time = df.WashU.PBMC$Survival/30.4167, event = df.WashU.PBMC$Deceased)~ Age+Nodal_Status+Neoadjuvant+True_Entropy_quartile_groups+Fraction_T_Cells_Group, data = df.WashU.PBMC)
+summary(res.cox)
+
+#Testing Proportional Hazards Assumption
+test.ph <- cox.zph(res.cox)
+test.ph
+
+#E
+res.cox <- coxph(Surv(time = df.TCGA$Survival/30.4167, event = df.TCGA$Deceased)~ Age+Nodal_Status+True_Entropy_quartile_groups, data = df.TCGA)
+summary(res.cox)
+
+#Testing Proportional Hazards Assumption
+test.ph <- cox.zph(res.cox)
+test.ph
+```
+
+#Testing Proportional Hazards Assumptions for age categorical model for AB and normal others
+```{r}
+#Create Age categorical Variables
+#UW/WashU
+df.UW_WashU.Tissue <- mutate(df.UW_WashU.Tissue,
+                       Age_cat = factor(ntile(Age,2)))
+table(df.UW_WashU.Tissue$Age_cat)
+
+#A/B
+res.cox <- coxph(Surv(time = df.UW_WashU.Tissue$Survival/30.4167, event = df.UW_WashU.Tissue$Deceased)~ Age_cat+Nodal_Status+Neoadjuvant+True_Entropy_quartile_groups+Fraction_T_Cells_Group, data = df.UW_WashU.Tissue)
+summary(res.cox)
+#Testing Proportional Hazards Assumption
+test.ph <- cox.zph(res.cox)
+test.ph
+# plot(test.ph)
+
+#C/D
+res.cox <- coxph(Surv(time = df.WashU.PBMC$Survival/30.4167, event = df.WashU.PBMC$Deceased)~ Age+Nodal_Status+Neoadjuvant+True_Entropy_quartile_groups+Fraction_T_Cells_Group, data = df.WashU.PBMC)
+summary(res.cox)
+
+#Testing Proportional Hazards Assumption
+test.ph <- cox.zph(res.cox)
+test.ph
+
+#E
+res.cox <- coxph(Surv(time = df.TCGA$Survival/30.4167, event = df.TCGA$Deceased)~ Age+Nodal_Status+True_Entropy_quartile_groups, data = df.TCGA)
+summary(res.cox)
+
+#Testing Proportional Hazards Assumption
+test.ph <- cox.zph(res.cox)
+test.ph
+
+```
+
+#Figure 2 Multivariate Cox Regression for Survival with Categorical Age for UW/WashU
+```{r}
+#A/B
+res.cox <- coxph(Surv(time = df.UW_WashU.Tissue$Survival/30.4167, event = df.UW_WashU.Tissue$Deceased)~ Age_cat+Nodal_Status+Neoadjuvant+True_Entropy_quartile_groups+Fraction_T_Cells_Group, data = df.UW_WashU.Tissue)
+summary(res.cox)
+
+ggsurvplot(survfit(res.cox,data = df.UW_WashU.Tissue), palette = "#2E9FDF",
+           ggtheme = theme_minimal()+theme(plot.title = element_text(hjust = 0.5)), title = "Multivariate Cox")
+
+#Testing to if True Entropy Quartile Group alone has a difference in survival
+Test_df <- with(df.UW_WashU.Tissue,
+               data.frame(True_Entropy_quartile_groups = c("Lower3Q","HighQ"), 
+                        Age_cat = rep(as.factor(1), 2),
+                        Fraction_T_Cells_Group = rep(as.factor("Below Median"), 2),
+                        Nodal_Status = rep(as.factor(1), 2),
+                        Neoadjuvant = rep(as.factor(0), 2)
+                          )
+               )
+Test_df
+fit <- survfit(res.cox, data = df.UW_WashU.Tissue, newdata = Test_df)
+a1 <- ggsurvplot(fit, conf.int = FALSE, legend.labs=c("Lower 3 Quartiles - True Entropy", "Upper Quartile - True Entropy"),
+           palette = c("#377EB8","#E41A1C"), surv.median.line = "hv",axes.offset = FALSE, ggtheme = theme(plot.title = element_text(hjust = 0.5, size = 20),
+                                                               legend.text = element_text(size = 12.5),
+                                                               axis.text.x = element_text(size = 12.5),
+                                                               axis.text.y = element_text(size = 12.5),
+                                                               axis.title.x = element_text(size = 12.5),
+                                                               axis.title.y = element_text(size = 12.5),
+                                                               axis.line = element_line(color='black'),
+                                                               panel.background = element_rect(color = "white", fill = "white"),
+                                                               panel.grid.major = element_blank(),
+                                                               panel.grid.minor = element_blank(),
+                                                               panel.border = element_blank()), 
+                                                               title = "UW and WashU - Tissue")
+
+output <- summary(res.cox)
+write.csv(data.frame(n = output$n, nevent = output$nevent, output$concordance),file = str_glue("{OUTPUT_DIR}/N_2AB_AgeCat.csv"))
+write.csv(data.frame(output$coefficients,output$conf.int),file = str_glue("{OUTPUT_DIR}/Coefficients_2AB_AgeCat.csv"))
+
+#Testing to if Fraction T cells alone has a difference in survival
+Test_df <- with(df.UW_WashU.Tissue,
+               data.frame(Fraction_T_Cells_Group = c("Below Median","Above Median"), 
+                        Age_cat = rep(as.factor(1), 2),
+                        True_Entropy_quartile_groups = rep(as.factor("Lower3Q"), 2),
+                        Nodal_Status = rep(as.factor(1), 2),
+                        Neoadjuvant = rep(as.factor(0), 2)
+                          )
+               )
+Test_df
+fit <- survfit(res.cox, data = df.UW_WashU.Tissue, newdata = Test_df)
+a2 <- ggsurvplot(fit, conf.int = FALSE, legend.labs=c("Below Median - Fraction T Cells", "Above Median - Fraction T Cells"),
+           palette = c("#377EB8","#E41A1C"), surv.median.line = "hv",axes.offset = FALSE, ggtheme = theme_minimal()+theme(plot.title = element_text(hjust = 0.5, size = 20),
+                                                               legend.text = element_text(size = 12.5),
+                                                               axis.text.x = element_text(size = 12.5),
+                                                               axis.text.y = element_text(size = 12.5),
+                                                               axis.title.x = element_text(size = 12.5),
+                                                               axis.title.y = element_text(size = 12.5),
+                                                               axis.line = element_line(color='black'),
+                                                               panel.background = element_rect(color = "white", fill = "white"),
+                                                               panel.grid.major = element_blank(),
+                                                               panel.grid.minor = element_blank(),
+                                                               panel.border = element_blank()), 
+                                                               title = "UW and WashU - Tissue")
+#Create Variables for Forest Plot
+tempData <- data.frame(output$coefficients)
+tempData <- tempData[-c(1),]
+Variables <- rownames(tempData)
+Effect <- tempData$exp.coef.
+tempData <- data.frame(output$conf.int)
+tempData <- tempData[-c(1),]
+ci_l <- tempData$lower..95
+ci_u <- tempData$upper..95
+Model <- rep("UW and WashU - Tissue",nrow(tempData))
+
+res.cox <- coxph(Surv(time = df.WashU.PBMC$Survival/30.4167, event = df.WashU.PBMC$Deceased)~ Age+Nodal_Status+Neoadjuvant+True_Entropy_quartile_groups+Fraction_T_Cells_Group, data = df.WashU.PBMC)
+summary(res.cox)
+ggsurvplot(survfit(res.cox,data = df.WashU.PBMC), palette = "#2E9FDF",
+           ggtheme = theme_minimal()+theme(plot.title = element_text(hjust = 0.5)), title = "Multivariate Cox")
+
+#Testing to if True Entropy Quartile Group alone has a difference in survival
+Test_df <- with(df.WashU.PBMC,
+               data.frame(True_Entropy_quartile_groups = c("Lower3Q","HighQ"), 
+                        Age = rep(mean(Age, na.rm = TRUE), 2),
+                        Fraction_T_Cells_Group = rep(as.factor("Below Median"), 2),
+                        Nodal_Status = rep(as.factor(1), 2),
+                        Neoadjuvant = rep(as.factor(0), 2)
+                          )
+               )
+Test_df
+fit <- survfit(res.cox, data = df.WashU.PBMC, newdata = Test_df)
+b1 <- ggsurvplot(fit, conf.int = FALSE, legend.labs=c("Lower 3 Quartiles - True Entropy", "Upper Quartile - True Entropy"),
+           palette = c("#377EB8","#E41A1C"), surv.median.line = "hv",axes.offset = FALSE, ggtheme = theme_minimal()+theme(plot.title = element_text(hjust = 0.5, size = 20),
+                                                               legend.text = element_text(size = 12.5),
+                                                               axis.text.x = element_text(size = 12.5),
+                                                               axis.text.y = element_text(size = 12.5),
+                                                               axis.title.x = element_text(size = 12.5),
+                                                               axis.title.y = element_text(size = 12.5),
+                                                               axis.line = element_line(color='black'),
+                                                               panel.background = element_rect(color = "white", fill = "white"),
+                                                               panel.grid.major = element_blank(),
+                                                               panel.grid.minor = element_blank(),
+                                                               panel.border = element_blank()),
+                                                               title = "WashU - PBMC")
+
+output <- summary(res.cox)
+write.csv(data.frame(n = output$n, nevent = output$nevent, output$concordance),file = str_glue("{OUTPUT_DIR}/N_2CD.csv"))
+write.csv(data.frame(output$coefficients,output$conf.int),file = str_glue("{OUTPUT_DIR}/Coefficients_2CD.csv"))
+
+#Testing to if Fraction T cells alone has a difference in survival
+Test_df <- with(df.WashU.PBMC,
+               data.frame(Fraction_T_Cells_Group = c("Below Median","Above Median"), 
+                        Age = rep(mean(Age, na.rm = TRUE), 2),
+                        True_Entropy_quartile_groups = rep(as.factor("Lower3Q"), 2),
+                        Nodal_Status = rep(as.factor(1), 2),
+                        Neoadjuvant = rep(as.factor(0), 2)
+                          )
+               )
+Test_df
+fit <- survfit(res.cox, data = df.WashU.PBMC, newdata = Test_df)
+b2 <- ggsurvplot(fit, conf.int = FALSE, legend.labs=c("Below Median - Fraction T Cells", "Above Median - Fraction T Cells"),
+           palette = c("#377EB8","#E41A1C"), surv.median.line = "hv",axes.offset = FALSE, ggtheme = theme_minimal()+theme(plot.title = element_text(hjust = 0.5, size = 20),
+                                                               legend.text = element_text(size = 12.5),
+                                                               axis.text.x = element_text(size = 12.5),
+                                                               axis.text.y = element_text(size = 12.5),
+                                                               axis.title.x = element_text(size = 12.5),
+                                                               axis.title.y = element_text(size = 12.5),
+                                                               axis.line = element_line(color='black'),
+                                                               panel.background = element_rect(color = "white", fill = "white"),
+                                                               panel.grid.major = element_blank(),
+                                                               panel.grid.minor = element_blank(),
+                                                               panel.border = element_blank()),
+                                                               title = "WashU - PBMC")
+
+#Create Variables for Forest Plot
+tempData <- data.frame(output$coefficients)
+tempData <- tempData[-c(1),]
+Variables <- append(Variables, rownames(tempData))
+Effect <- append(Effect,tempData$exp.coef.)
+tempData <- data.frame(output$conf.int)
+tempData <- tempData[-c(1),]
+ci_l <- append(ci_l,tempData$lower..95)
+ci_u <- append(ci_u,tempData$upper..95)
+Model <- append(Model,rep("WashU - PBMC",nrow(tempData)))
+
+#3c. Confirmation of tissue diversity and OS relationship with TCGA data
+res.cox <- coxph(Surv(time = df.TCGA$Survival/30.4167, event = df.TCGA$Deceased)~ Age+Nodal_Status+True_Entropy_quartile_groups, data = df.TCGA)
+summary(res.cox)
+ggsurvplot(survfit(res.cox,data = df.TCGA), palette = "#2E9FDF",
+           ggtheme = theme_minimal()+theme(plot.title = element_text(hjust = 0.5)), title = "Multivariate Cox")
+
+#Testing to if True Entropy Quartile Groups alone has a difference in survival
+Test_df <- with(df.TCGA,
+               data.frame(True_Entropy_quartile_groups = c("Lower3Q","HighQ"), 
+                        Age = rep(mean(Age, na.rm = TRUE), 2),
+                        Nodal_Status = rep(as.factor(1), 2)
+                          )
+               )
+Test_df
+fit <- survfit(res.cox, data = df.TCGA, newdata = Test_df)
+c1 <- ggsurvplot(fit, conf.int = FALSE, legend.labs=c("Lower 3 Quartiles - True Entropy", "Upper Quartile - True Entropy"),
+           palette = c("#377EB8","#E41A1C"), surv.median.line = "hv",axes.offset = FALSE, ggtheme = theme_minimal()+theme(plot.title = element_text(hjust = 0.5, size = 20),
+                                                               legend.text = element_text(size = 12.5),
+                                                               axis.text.x = element_text(size = 12.5),
+                                                               axis.text.y = element_text(size = 12.5),
+                                                               axis.title.x = element_text(size = 12.5),
+                                                               axis.title.y = element_text(size = 12.5),
+                                                               axis.line = element_line(color='black'),
+                                                               panel.background = element_rect(color = "white", fill = "white"),
+                                                               panel.grid.major = element_blank(),
+                                                               panel.grid.minor = element_blank(),
+                                                               panel.border = element_blank()),
+                                                               title = "TCGA - Tissue")
+
+output <- summary(res.cox)
+write.csv(data.frame(n = output$n, nevent = output$nevent, output$concordance),file = str_glue("{OUTPUT_DIR}/N_2E.csv"))
+write.csv(data.frame(output$coefficients,output$conf.int),file = str_glue("{OUTPUT_DIR}/Coefficients_2E.csv"))
+
+#Create Variables for Forest Plot
+tempData <- data.frame(output$coefficients)
+tempData <- tempData[-c(1),]
+Variables <- append(Variables, rownames(tempData))
+Effect <- append(Effect,tempData$exp.coef.)
+tempData <- data.frame(output$conf.int)
+tempData <- tempData[-c(1),]
+ci_l <- append(ci_l,tempData$lower..95)
+ci_u <- append(ci_u,tempData$upper..95)
+Model <- append(Model,rep("TCGA - Tissue",nrow(tempData)))
+
+#F Forest Plot Summarizing Data
+df.Forest_Plot <- data.frame(Variables, Effect, ci_l, ci_u, Model)
+
+#Rename Variables
+df.Forest_Plot$Variables <- ifelse(df.Forest_Plot$Variables == "Nodal_Status1","Positive Nodal Status",
+                                   ifelse(df.Forest_Plot$Variables == "Neoadjuvant1", "Neoadjuvant Therapy",
+                                    ifelse(df.Forest_Plot$Variables == "True_Entropy_quartile_groupsHighQ", "Upper Quartile - True Entropy",
+                                           ifelse(df.Forest_Plot$Variables == "Fraction_T_Cells_GroupAbove Median","Above Median - Fraction T Cells","--"))))
+
+#Set Factors for Sex
+df.Forest_Plot$Variables <- factor(df.Forest_Plot$Variables,levels = c("Age","Positive Nodal Status", "Neoadjuvant Therapy", "Upper Quartile - True Entropy", "Above Median - Fraction T Cells"))
+
+#Reorder By Variables
+df.Forest_Plot <- rbind(subset(df.Forest_Plot, Variables == "Positive Nodal Status"), subset(df.Forest_Plot, Variables == "Neoadjuvant Therapy"), subset(df.Forest_Plot, Variables == "Upper Quartile - True Entropy"), subset(df.Forest_Plot, Variables == "Above Median - Fraction T Cells"))
+
+#Create Index Variable
+#df.Forest_Plot$Index <- c(1,4,7,9,12,2,5,8,10,13,3,6,11)
+
+for (i in 1:nrow(df.Forest_Plot)) {
+   df.Forest_Plot$Index[i] <- i
+ }
+
+#just some code to format the x-axis label
+xname <- "Hazard Ratio"
+
+#setting up the basic plot
+p <- ggplot(data=df.Forest_Plot, aes(y=Index, x=Effect, xmin=ci_l, xmax=ci_u))+ 
+
+#this adds the effect sizes to the plot
+geom_point()+ 
+
+#this changes the features of the overall effects
+#one could resize, reshape, or recolor these points if desired
+# geom_point(data=subset(df.Forest_Plot, Comparison=="All"), color="Black", size=2)+ 
+
+#adds the CIs
+geom_errorbarh(height=.5)+
+
+#sets the scales
+#note that I reverse the y axis to correctly order the effect #sizes based on my index variable
+scale_x_continuous(limits=c(0,4), name=xname)+
+scale_y_continuous(name = "", breaks=1:10, labels = df.Forest_Plot$Model, trans = "reverse")+
+
+#adding a vertical line at the effect = 0 mark
+geom_vline(xintercept=1, color="black", linetype="dashed", alpha=.5)+
+
+#faceting based on my subgroups
+facet_grid(Variables~., scales= "free", space="free")+
+
+#thematic stuff
+ggtitle("")+
+theme_minimal()+
+theme(text=element_text(family="Times",size=16, color="black"))+
+theme(panel.spacing = unit(2, "lines"))
+
+p
+
+pdf(str_glue("{OUTPUT_DIR}/2_AB_Age_cat.pdf"))
+print(a1)
+print(a2)
+print(b1)
+print(b2)
+print(c1)
+print(p)
+dev.off()
+```
+
+#S1 - Fraction T cells and TCR Diversity by Neoadjuvant Therapy
+```{r}
+table(df.WashU$Nodal_Status, useNA = "ifany")
+subset(df.WashU,is.na(Nodal_Status))$Sample_Name
+#There is 1 NA for nodal status that was not removed when I combined the PBMC and Tissue WashU cohort
+#Removing here so that the cohort matches up exactly (Sample ID 500)
+df.WashU <- subset(df.WashU,!is.na(Nodal_Status))
+table(df.WashU$Sample_Type,useNA = "ifany")
+#Check that we have correct number of PBMC and tissue (152 and 116)
+
+### Panel A
+#WashU PBMC and Wash U Tissue Fraction T
+df.WashU$Neoadjuvant2 <- factor(df.WashU$Neoadjuvant2, levels = c("Chemo","Chemorad","None"))
+my_comparisons <- list(c("Chemo","Chemorad"),c("Chemo","None"),c("Chemorad","None"))
+pdf(str_glue("{OUTPUT_DIR}/WashU_Neoadjuvant2_Fraction_T.pdf"), height = 4.5, width = 7)
+print(ggplot(df.WashU,aes_string(x = "Neoadjuvant2", y = "fraction_productive_of_cells", group = "Neoadjuvant2", fill = "Neoadjuvant2")) + geom_boxplot() + stat_compare_means(method = "t.test", paired = FALSE, comparisons = my_comparisons) +  stat_compare_means(method = "anova") + ggtitle("Fraction T cells") + theme_classic() + theme(plot.title = element_text(hjust = 0.5), axis.title.x=element_blank(), axis.title.y=element_blank()) +facet_wrap(~Sample_Type) + scale_fill_brewer(palette = "Set1")) 
+dev.off()
+
+#One way ANOVA testing
+compare_means(fraction_productive_of_cells~Neoadjuvant2, method ='anova',data = subset(df.WashU, Sample_Type == "PBMC"))
+compare_means(fraction_productive_of_cells~Neoadjuvant2, method ='anova',data = subset(df.WashU, Sample_Type == "Tissue"))
+
+#Adjusted Pairwise comparisons
+compare_means(fraction_productive_of_cells~Neoadjuvant2,comparisons = my_comparisons, p.adjust.method = "fdr",  method ='t.test',data = subset(df.WashU, Sample_Type == "PBMC"))
+compare_means(fraction_productive_of_cells~Neoadjuvant2,comparisons = my_comparisons, p.adjust.method = "fdr",  method ='t.test',data = subset(df.WashU, Sample_Type == "Tissue"))
+
+#N values for plot
+table(df.WashU$Neoadjuvant2,df.WashU$Sample_Type, useNA = "ifany")
+
+### Panel B
+#WashU PBMC and Wash U Tissue True Entropy
+pdf(str_glue("{OUTPUT_DIR}/WashU_Neoadjuvant2_True_Entropy.pdf"), height = 4.5, width = 7)
+print(ggplot(df.WashU,aes_string(x = "Neoadjuvant2", y = "True_Entropy", group = "Neoadjuvant2", fill = "Neoadjuvant2")) + geom_boxplot() + stat_compare_means(method = "t.test", paired = FALSE, comparisons = my_comparisons) + stat_compare_means(method = "anova") + ggtitle("True Entropy") + theme_classic() + theme(plot.title = element_text(hjust = 0.5), axis.title.x=element_blank(), axis.title.y=element_blank()) +facet_wrap(~Sample_Type) + scale_fill_brewer(palette = "Set1")) 
+dev.off()
+
+#One way ANOVA testing
+compare_means(True_Entropy~Neoadjuvant2, method ='anova',data = subset(df.WashU, Sample_Type == "PBMC"))
+compare_means(True_Entropy~Neoadjuvant2, method ='anova',data = subset(df.WashU, Sample_Type == "Tissue"))
+
+#Tests with FDR
+compare_means(True_Entropy~Neoadjuvant2,comparisons = my_comparisons, p.adjust.method = "fdr",  method ='t.test',data = subset(df.WashU, Sample_Type == "PBMC"))
+compare_means(True_Entropy~Neoadjuvant2,comparisons = my_comparisons, p.adjust.method = "fdr",  method ='t.test',data = subset(df.WashU, Sample_Type == "Tissue"))
+```
+
+#S2 - TCR Diversity and Age
+```{r}
+### Panel A
+#WashU PBMC
+sp <- ggscatter(df.WashU.PBMC, x = "Age", y = "True_Entropy",
+   add = "reg.line",  # Add regression line
+   add.params = list(color = "blue", fill = "lightgray"), # Customize reg. line
+   conf.int = TRUE)
+pdf(str_glue("{OUTPUT_DIR}/WashU_PBMC_Age_TrueEntropy.pdf"), height = 4, width = 4)
+#Add correlation coefficient
+print(sp + stat_cor(method = "pearson") + ggtitle ("WashU - PBMC") + theme(plot.title = element_text(hjust = 0.5)))
+dev.off()
+
+### Panel B
+#WashU Tissue
+sp <- ggscatter(df.WashU.Tissue, x = "Age", y = "True_Entropy",
+   add = "reg.line",  # Add regression line
+   add.params = list(color = "blue", fill = "lightgray"), # Customize reg. line
+   conf.int = TRUE)
+pdf(str_glue("{OUTPUT_DIR}/WashU_Tissue_Age_TrueEntropy.pdf"), height = 4, width = 4)
+#Add correlation coefficient
+print(sp + stat_cor(method = "pearson")+ ggtitle ("WashU - Tissue") + theme(plot.title = element_text(hjust = 0.5)))
+dev.off()
+
+#N for figure legend
+summary(df.WashU.PBMC$Age, useNA = "ifany")
+nrow(df.WashU.PBMC)
+
+summary(df.WashU.Tissue$Age, useNA = "ifany")
+nrow(df.WashU.Tissue)
+
+```
+
+#S3 - Fraction T cells and TCR Diversity by Stage
+```{r}
+#Subset to WashU and TCGA
+df.Stage <- subset(df.All_Cohorts, Cohort2 %in% (c("WashU - PBMC","WashU - Tissue", "TCGA - Tissue")))
+
+df.Stage$Stage2 <- if_else(df.Stage$Stage == "IA","I",
+                                  if_else(df.Stage$Stage == "IB","I",
+                                          if_else(df.Stage$Stage == "IIA","II",
+                                                  if_else(df.Stage$Stage == "IIB","II",
+                                                          if_else(df.Stage$Stage == "III","III","NA")))))
+
+
+df.Stage_WashU <- subset(df.Stage, Cohort2 %in% (c("WashU - PBMC","WashU - Tissue")))
+
+my_comparisons <- list(c("I","II"),c("I","III"),c("II","III"))
+
+### Panel A
+#WashU groups Fraction T cells by Stage
+pdf(str_glue("{OUTPUT_DIR}/WashU_Stage_FractionT.pdf"), height = 4.5, width = 7)
+print(ggplot(subset(df.Stage_WashU, Stage2 %in% c("I","II","III")),aes_string(x = "Stage2", y = "fraction_productive_of_cells", group = "Stage2", fill = "Stage2")) + geom_boxplot() + stat_compare_means(method = "t.test", paired = FALSE, comparisons = my_comparisons) + stat_compare_means(method = "anova") + ggtitle("Fraction T Cells") + theme_classic() + theme(plot.title = element_text(hjust = 0.5), axis.title.x=element_blank(), axis.title.y=element_blank()) + scale_color_brewer(palette = "Set1")+facet_wrap(~Cohort2))
+dev.off()
+
+### Panel B
+#WashU groups Entropy by Stage
+pdf(str_glue("{OUTPUT_DIR}/WashU_Stage_True Entropy.pdf"), height = 4.5, width = 7)
+print(ggplot(subset(df.Stage_WashU, Stage2 %in% c("I","II","III")),aes_string(x = "Stage2", y = "True_Entropy", group = "Stage2", fill = "Stage2")) + geom_boxplot() + stat_compare_means(method = "t.test", paired = FALSE, comparisons = my_comparisons) + stat_compare_means(method = "anova") + ggtitle("True Entropy") + theme_classic() + theme(plot.title = element_text(hjust = 0.5), axis.title.x=element_blank(), axis.title.y=element_blank()) + scale_color_brewer(palette = "Set1")+facet_wrap(~Cohort2))
+dev.off()
+
+#N values for figures
+table(df.Stage_WashU$Stage2, df.Stage_WashU$Sample_Type, useNA = "ifany")
+
+#Fraction T
+#One way ANOVA testing
+compare_means(fraction_productive_of_cells~Stage2, method ='anova',data = subset(df.Stage_WashU, Sample_Type == "PBMC"))
+compare_means(fraction_productive_of_cells~Stage2, method ='anova',data = subset(df.Stage_WashU, Sample_Type == "Tissue"))
+
+compare_means(fraction_productive_of_cells~Stage2, method ='t.test',p.adjust.method = "fdr", data = subset(df.Stage_WashU, Sample_Type == "PBMC"))
+compare_means(fraction_productive_of_cells~Stage2, method ='t.test',p.adjust.method = "fdr", data = subset(df.Stage_WashU, Sample_Type == "Tissue"))
+
+#True Entropy
+#One way ANOVA testing
+compare_means(True_Entropy~Stage2, method ='anova',data = subset(df.Stage_WashU, Sample_Type == "PBMC"))
+compare_means(True_Entropy~Stage2, method ='anova',data = subset(df.Stage_WashU, Sample_Type == "Tissue"))
+
+compare_means(True_Entropy~Stage2, method ='t.test',p.adjust.method = "fdr",data = subset(df.Stage_WashU, Sample_Type == "PBMC"))
+compare_means(True_Entropy~Stage2, method ='t.test',p.adjust.method = "fdr",data = subset(df.Stage_WashU, Sample_Type == "Tissue"))
+
+
+df.Stage_WashU.PBMC <- subset(df.Stage, Cohort2 %in% (c("WashU - PBMC")))
+summary(df.Stage_WashU.PBMC$Survival,useNA = "ifany")
+table(df.Stage_WashU.PBMC$Deceased, useNA = "ifany")
+table(df.Stage_WashU.PBMC$Stage2, useNA = "ifany")
+nrow(df.Stage_WashU.PBMC)
+
+#WashU survival plot by Stage
+fit <- survfit(Surv(time = df.Stage_WashU.PBMC$Survival/30.4167, event = df.Stage_WashU.PBMC$Deceased) 
+                 ~Stage2, data = df.Stage_WashU.PBMC)
+pdf(str_glue("{OUTPUT_DIR}/WashU_SurvPlot_Stage.pdf"), height = 4, width = 6)
+print(ggsurvplot(fit, data = df.Stage_WashU.PBMC, risk.table = TRUE, risk.table.y.text= FALSE,risk.table.fontsize = 4 , risk.table.height = .3, break.time.by = 25, surv.median.line = "hv", pval = TRUE, pval.method = TRUE, pval.coord = c(75,.9), pval.method.coord = c(60,.9),title = "WashU", axes.offset = TRUE, ggtheme = theme_minimal()+theme(plot.title = element_text(hjust = 0.5), axis.line = element_line(color='black'), panel.background = element_rect(color = "white", fill = "white"),panel.grid.major = element_blank(),panel.grid.minor = element_blank(),panel.border = element_blank())) +guides(color = guide_legend(nrow = 2)))
+dev.off()
+```
+
+#S4 - Fraction T cells and TCR Diversity by Grade
+```{r}
+#Subset to WashU
+df.GradePlot <- subset(df.All_Cohorts, Cohort2 %in% (c("WashU - PBMC","WashU - Tissue")))
+
+#Read in Grade
+df.Grade <- fread(str_glue("{DATA_DIR}/WashU/PDAC_Patient_data_forR.csv"))
+df.Grade <- df.Grade[,c(1,10)]
+names(df.Grade)[names(df.Grade) == "Patient"] <- "Sample_Name"
+
+#Merege Grade to normal DF
+df.GradePlot <- merge(df.GradePlot,df.Grade, by = "Sample_Name")
+
+#Fix Grade values
+df.GradePlot$Grade2 <- if_else(df.GradePlot$Grade == "G1_G2","G2",
+                             if_else(df.GradePlot$Grade == "G1_G2_G3","G3",
+                                     if_else(df.GradePlot$Grade == "G2_G3","G3",
+                                             if_else(df.GradePlot$Grade == "G1","G1",
+                                                     if_else(df.GradePlot$Grade == "G2","G2",
+                                                             if_else(df.GradePlot$Grade == "G3","G3","0"))))))
+df.GradePlot$Grade2 <- factor(df.GradePlot$Grade2, levels = c("G1","G2","G3"))
+
+variable <- c("True_Entropy","fraction_productive_of_cells")
+my_comparisons <- list(c("G1","G2"),c("G1","G3"),c("G2","G3"))
+
+### Panel A
+#WashU groups Fraction T cells by Grade
+pdf(str_glue("{OUTPUT_DIR}/WashU_Grade_FractionT.pdf"), height = 4.5, width = 7)
+print(ggplot(subset(df.GradePlot, Grade2 %in% c("G1","G2","G3")),aes_string(x = "Grade2", y = "fraction_productive_of_cells", group = "Grade2", fill = "Grade2")) + geom_boxplot() + stat_compare_means(method = "t.test", paired = FALSE, comparisons = my_comparisons, label =) + stat_compare_means(method = "anova") + ggtitle("Fraction T Cells") + theme_classic() + theme(plot.title = element_text(hjust = 0.5), axis.title.x=element_blank(), axis.title.y=element_blank()) + scale_color_brewer(palette = "Set1")+facet_wrap(~Cohort2))
+dev.off()
+
+### Panel B
+#WashU groups Entropy by Grade
+pdf(str_glue("{OUTPUT_DIR}/WashU_Grade_True Entropy.pdf"), height = 4.5, width = 7)
+print(ggplot(subset(df.GradePlot, Grade2 %in% c("G1","G2","G3")),aes_string(x = "Grade2", y = "True_Entropy", group = "Grade2", fill = "Grade2")) + geom_boxplot() + stat_compare_means(method = "t.test", paired = FALSE, comparisons = my_comparisons) +  stat_compare_means(method = "anova") + ggtitle("True Entropy") + theme_classic() + theme(plot.title = element_text(hjust = 0.5), axis.title.x=element_blank(), axis.title.y=element_blank()) + scale_color_brewer(palette = "Set1")+facet_wrap(~Cohort2))
+dev.off()
+
+#N for Grade
+table(df.GradePlot$Grade2,df.GradePlot$Sample_Type, useNA = "ifany")
+
+#Fraction T cells
+#One way ANOVA testing
+compare_means(fraction_productive_of_cells~Grade2, method ='anova',data = subset(df.GradePlot, Sample_Type == "PBMC"))
+compare_means(fraction_productive_of_cells~Grade2, method ='anova',data = subset(df.GradePlot, Sample_Type == "Tissue"))
+
+compare_means(fraction_productive_of_cells~Grade2,comparisons = my_comparisons, p.adjust.method = "fdr",  method ='t.test',data = subset(df.GradePlot, Sample_Type == "PBMC"))
+#Tests with FDR if needed in the future
+compare_means(fraction_productive_of_cells~Grade2,comparisons = my_comparisons, p.adjust.method = "fdr",  method ='t.test',data = subset(df.GradePlot, Sample_Type == "Tissue"))
+
+#True Entropy
+#One way ANOVA testing
+compare_means(True_Entropy~Grade2, method ='anova',data = subset(df.GradePlot, Sample_Type == "PBMC"))
+compare_means(True_Entropy~Grade2, method ='anova',data = subset(df.GradePlot, Sample_Type == "Tissue"))
+
+compare_means(True_Entropy~Grade2, p.adjust.method = "fdr",  method ='t.test',data = subset(df.GradePlot, Sample_Type == "PBMC"))
+compare_means(True_Entropy~Grade2, p.adjust.method = "fdr",  method ='t.test',data = subset(df.GradePlot, Sample_Type == "Tissue"))
+
+df.Grade_WashU.PBMC <- subset(df.GradePlot, Cohort2 %in% (c("WashU - PBMC")))
+
+#WashU survival plot by Grade
+fit <- survfit(Surv(time = df.Grade_WashU.PBMC$Survival/30.4167, event = df.Grade_WashU.PBMC$Deceased) 
+                 ~Grade2, data = df.Grade_WashU.PBMC)
+pdf(str_glue("{OUTPUT_DIR}/WashU_SurvPlot_Grade.pdf"), height = 4, width = 6)
+print(ggsurvplot(fit, data = df.Grade_WashU.PBMC, risk.table = TRUE, risk.table.y.text= FALSE,risk.table.fontsize = 4 , risk.table.height = .3, break.time.by = 25, surv.median.line = "hv", pval = TRUE, pval.method = TRUE, pval.coord = c(75,.9), pval.method.coord = c(60,.9),title = "WashU", axes.offset = TRUE, ggtheme = theme_minimal()+theme(plot.title = element_text(hjust = 0.5), axis.line = element_line(color='black'), panel.background = element_rect(color = "white", fill = "white"),panel.grid.major = element_blank(),panel.grid.minor = element_blank(),panel.border = element_blank())) +guides(color = guide_legend(nrow = 2)))
+dev.off()
+```
+
+#S5 Survival by TCR Diversity Groups
+```{r}
+#Create High Q, Mid Q and Low Quartile for True  Entropy
+#WashU - Tissue
+df.WashU.Tissue$True_Entropy_quartile_groups_all <-ifelse(df.WashU.Tissue$True_Entropy <= quantile(df.WashU.Tissue$True_Entropy,na.rm=TRUE)[2],"LowQ",ifelse(df.WashU.Tissue$True_Entropy >= quantile(df.WashU.Tissue$True_Entropy,na.rm=TRUE)[4],"HighQ","MidQ"))
+df.WashU.Tissue$True_Entropy_quartile_groups_all <- factor(df.WashU.Tissue$True_Entropy_quartile_groups_all, levels = c("LowQ","MidQ","HighQ"))
+
+#Wash U - PBMC
+df.WashU.PBMC$True_Entropy_quartile_groups_all <-ifelse(df.WashU.PBMC$True_Entropy <= quantile(df.WashU.PBMC$True_Entropy,na.rm=TRUE)[2],"LowQ",ifelse(df.WashU.PBMC$True_Entropy >= quantile(df.WashU.PBMC$True_Entropy,na.rm=TRUE)[4],"HighQ","MidQ"))
+df.WashU.PBMC$True_Entropy_quartile_groups_all <- factor(df.WashU.PBMC$True_Entropy_quartile_groups_all, levels = c("LowQ","MidQ","HighQ"))
+
+#UW
+df.UW$True_Entropy_quartile_groups_all <-ifelse(df.UW$True_Entropy <= quantile(df.UW$True_Entropy,na.rm=TRUE)[2],"LowQ",ifelse(df.UW$True_Entropy >= quantile(df.UW$True_Entropy,na.rm=TRUE)[4],"HighQ","MidQ"))
+df.UW$True_Entropy_quartile_groups_all <- factor(df.UW$True_Entropy_quartile_groups_all, levels = c("LowQ","MidQ","HighQ"))
+
+#UW + WashU
+df.UW_WashU.Tissue$True_Entropy_quartile_groups_all <-ifelse(df.UW_WashU.Tissue$True_Entropy <= quantile(df.UW_WashU.Tissue$True_Entropy,na.rm=TRUE)[2],"LowQ",ifelse(df.UW_WashU.Tissue$True_Entropy >= quantile(df.UW_WashU.Tissue$True_Entropy,na.rm=TRUE)[4],"HighQ","MidQ"))
+df.UW_WashU.Tissue$True_Entropy_quartile_groups_all <- factor(df.UW_WashU.Tissue$True_Entropy_quartile_groups_all, levels = c("LowQ","MidQ","HighQ"))
+
+### Panel A
+### Wash U Tissue
+fit <- survfit(Surv(time = df.WashU.Tissue$Survival/30.4167, event = df.WashU.Tissue$Deceased) 
+                 ~True_Entropy_quartile_groups_all, data = df.WashU.Tissue)
+
+plota <- ggsurvplot(fit, data = df.WashU.Tissue, risk.table = TRUE, risk.table.y.text= FALSE,risk.table.fontsize = 4 , risk.table.height = .3, break.time.by = 25, surv.median.line = "hv", pval = TRUE, pval.method = TRUE, pval.coord = c(75,.9), pval.method.coord = c(60,.9),title = "WashU - Tissue",legend.labs=c("Lower Quartile - True Entropy", "Middle Quartiles - True Entropy", "Upper Quartile - True Entropy"), palette = c("#377EB8","#4DAF4A","#E41A1C" ), axes.offset = FALSE, ggtheme = theme_minimal()+theme(plot.title = element_text(hjust = 0.5), axis.line = element_line(color='black'), panel.background = element_rect(color = "white", fill = "white"),panel.grid.major = element_blank(),panel.grid.minor = element_blank(),panel.border = element_blank())) +guides(color = guide_legend(nrow = 2))
+
+### Panel B
+### WashU PBMC
+fit <- survfit(Surv(time = df.WashU.PBMC$Survival/30.4167, event = df.WashU.PBMC$Deceased) 
+                 ~True_Entropy_quartile_groups_all, data = df.WashU.PBMC)
+
+plotb <- ggsurvplot(fit, data = df.WashU.PBMC, risk.table = TRUE, risk.table.y.text= FALSE,risk.table.fontsize = 4 , risk.table.height = .3, break.time.by = 25, surv.median.line = "hv", pval = TRUE, pval.method = TRUE, pval.coord = c(75,.9), pval.method.coord = c(60,.9),title = "WashU - PBMC",legend.labs=c("Lower Quartile - True Entropy", "Middle Quartiles - True Entropy", "Upper Quartile - True Entropy"), palette = c("#377EB8","#4DAF4A","#E41A1C" ), axes.offset = FALSE, ggtheme = theme_minimal()+theme(plot.title = element_text(hjust = 0.5), axis.line = element_line(color='black'), panel.background = element_rect(color = "white", fill = "white"),panel.grid.major = element_blank(),panel.grid.minor = element_blank(),panel.border = element_blank())) +guides(color = guide_legend(nrow = 2))
+
+#UW and WashU
+fit <- survfit(Surv(time = df.UW_WashU.Tissue$Survival/30.4167, event = df.UW_WashU.Tissue$Deceased) 
+                 ~True_Entropy_quartile_groups_all, data = df.UW_WashU.Tissue)
+
+plotc <- ggsurvplot(fit, data = df.UW_WashU.Tissue, risk.table = TRUE, risk.table.y.text= FALSE,risk.table.fontsize = 4 , risk.table.height = .3, break.time.by = 25, surv.median.line = "hv", pval = TRUE, pval.method = TRUE, pval.coord = c(75,.9), pval.method.coord = c(60,.9),title = "UW and WashU - Tissue",legend.labs=c("Lower Quartile - True Entropy", "Middle Quartiles - True Entropy", "Upper Quartile - True Entropy"), palette = c("#377EB8","#4DAF4A","#E41A1C" ), axes.offset = FALSE, ggtheme = theme_minimal()+theme(plot.title = element_text(hjust = 0.5), axis.line = element_line(color='black'), panel.background = element_rect(color = "white", fill = "white"),panel.grid.major = element_blank(),panel.grid.minor = element_blank(),panel.border = element_blank())) +guides(color = guide_legend(nrow = 2))
+
+pdf(str_glue("{OUTPUT_DIR}/S5.pdf"))
+print(plota)
+print(plotb)
+print(plotc)
+dev.off()
+```
+
+#PBMC and Tissue Overlap
+```{r}
+#Read in metadata file
+PBMC_Metadata <- fread(str_glue("{DATA_DIR}/WashU/MetaData.FNF.PBMC.txt"))
+
+#Read in metadata file
+Tissue_Metadata<- fread(str_glue("{DATA_DIR}/WashU/MetaData.FNF.Tissue.txt"))
+
+#Rename for Join
+names(PBMC_Metadata)[names(PBMC_Metadata) == "file_name"] <- "file_name_PBMC"
+names(Tissue_Metadata)[names(Tissue_Metadata) == "file_name"] <- "file_name_Tissue"
+
+#Select relevant columns
+PBMC_Metadata <- subset(PBMC_Metadata, select = c(file_name_PBMC, Sample_Name))
+Tissue_Metadata <- subset(Tissue_Metadata, select = c(file_name_Tissue, Sample_Name))
+
+nrow(PBMC_Metadata)
+nrow(Tissue_Metadata)
+
+#Merge
+Combined_Metadata <- merge(PBMC_Metadata, Tissue_Metadata, by = "Sample_Name")
+nrow(Combined_Metadata)
+
+#Subset so only patients in the final tissue analysis
+Combined_Metadata <- subset(Combined_Metadata, Sample_Name %in% df.WashU.Tissue$Sample_Name)
+nrow(Combined_Metadata)
+
+#Create data table for Overlap
+Overlap <- data.frame(matrix(ncol=8, nrow = 0))
+colnames(Overlap) <- c("Sample_Name","Total_PBMC","Total_Tissue","Number_Overlap","Percent_Overlap","Cumulative_Count_Overlap","Cumulative_Productive_Frequency_Overlap","True_Entropy_Overlap")
+
+#Loop through each clonotype table
+for (i in 1:nrow(Combined_Metadata)) {
+
+  #Read in Clonotype Tables
+  temp_PBMC <- fread(str_glue("{DATA_DIR}/WashU/{Combined_Metadata$file_name_PBMC[i]}"))
+  temp_Tissue <- fread(str_glue("{DATA_DIR}/WashU/{Combined_Metadata$file_name_Tissue[i]}"))
+
+  #Set Variables
+  Sample_Name <- Combined_Metadata$Sample_Name[i]
+  Total_PBMC <- nrow(temp_PBMC)
+  Total_Tissue <- nrow(temp_Tissue)
+  Number_Overlap <- sum(temp_Tissue$cdr3aa %in% temp_PBMC$cdr3aa)
+  Percent_Overlap <- Number_Overlap/Total_PBMC
+  
+  temp_overlap <- subset(temp_PBMC,temp_PBMC$cdr3aa %in% temp_Tissue$cdr3aa)
+  Cumulative_Count_Overlap <- sum(temp_overlap$count)
+  Cumulative_Productive_Frequency_Overlap <- sum(temp_overlap$freq)
+  True_Entropy_Overlap <- predict_true_entropy_from_counts(temp_overlap$count, 2 , TRUE)
+  
+  #Create Entry data frame
+  entry <- data.frame(Sample_Name,Total_PBMC,Total_Tissue,Number_Overlap, Percent_Overlap, Cumulative_Count_Overlap, Cumulative_Productive_Frequency_Overlap,True_Entropy_Overlap)
+  
+  #Bind
+  Overlap <- rbind(Overlap, entry)
+  }
+
+#merge for clinical data
+Overlap <- merge(Overlap, subset(df.WashU.PBMC, select = c(Sample_Name,Survival,Deceased,Age,Nodal_Status,Neoadjuvant,Fraction_T_Cells_Group,fraction_productive_of_cells, True_Entropy, True_Entropy_quartile_groups)), by = "Sample_Name")
+```
+
+#Data Visualization of Tissue PBMC of Overlap
+```{r}
+#Comparison of PBMC/Tumor overlap by survival group
+#Grab Survival Group for Plotting
+Overlap <- merge(Overlap, subset(df.WashU.Tissue, select = c(Sample_Name,Survival_Group)))
+Overlap$Survival_Group <- factor(Overlap$Survival_Group, levels = c("LT","MT","ST","PO","S"))
+
+#Percent Overlap by Survival Group
+pdf(str_glue("{OUTPUT_DIR}/PBMC_Tumor_Overlap_Percent.pdf"), height = 4, width = 4)
+print(ggplot(subset(Overlap, Survival_Group %in% c("ST","MT","LT")),aes_string(x = "Survival_Group", y = "Percent_Overlap", group = "Survival_Group", fill = "Survival_Group")) + geom_boxplot() 
+      #+ stat_compare_means(method = "t.test", paired = FALSE, comparisons = my_comparisons) 
+      + stat_compare_means(method = "anova") + ggtitle("Percent of All Peripheral Clonotypes Present Intratumorally") + theme_classic() + theme(plot.title = element_text(size = 12, hjust = 0.5), axis.title.x=element_blank(), axis.title.y=element_blank()) + scale_color_manual(values = c("#8DD3C7","#FFFFB3","#80B1D3")) + scale_fill_manual(values = c("#8DD3C7","#FFFFB3","#80B1D3")))
+dev.off()
+
+#Cumulative Productive Freq by Survival Group
+pdf(str_glue("{OUTPUT_DIR}/PBMC_Tumor_Overlap_Cumulative_PF.pdf"), height = 4, width = 4)
+print(ggplot(subset(Overlap, Survival_Group %in% c("ST","MT","LT")),aes_string(x = "Survival_Group", y = "Cumulative_Productive_Frequency_Overlap", group = "Survival_Group", fill = "Survival_Group")) + geom_boxplot() 
+      #+ stat_compare_means(method = "t.test", paired = FALSE, comparisons = my_comparisons) 
+      + stat_compare_means(method = "anova") + ggtitle("Cumulative Productive Frequency of Peripheral Clonotypes Present Intratumorally") + theme_classic() + theme(plot.title = element_text(size = 12, hjust = 0.5), axis.title.x=element_blank(), axis.title.y=element_blank()) + scale_color_manual(values = c("#8DD3C7","#FFFFB3","#80B1D3")) + scale_fill_manual(values = c("#8DD3C7","#FFFFB3","#80B1D3")))
+dev.off()
+```
+
+#Clonal Expansion Investigation
+```{r}
+#WashU Tisse
+#Read in metadata file
+df.FNF_Metadata<- fread(str_glue("{DATA_DIR}/WashU/MetaData.FNF.Tissue.txt"))
+
+#Create data table for Distribution
+df.Distribution <- data.frame(matrix(ncol=6, nrow = 0))
+colnames(df.Distribution) <- c("Sample_Name","1-5","6-10","11-50","51-100","100+")
+
+#Loop through each clonotype table
+for (i in 1:nrow(df.FNF_Metadata)) {
+
+  #Read in Clonotype Table
+  df.temp_table <- fread(str_glue("{DATA_DIR}/WashU/{df.FNF_Metadata[i,1]}"))
+  
+  #Order Clonotypes by Productive Frequency
+  ordered <- arrange(df.temp_table, desc(freq))
+  
+  #Calculate Cumulative Productive Frequency for Each Group
+  df.entry <- data.frame(df.FNF_Metadata[i,3],sum(ordered$freq[1:5]), sum(ordered$freq[6:10]), sum(ordered$freq[11:50]),sum(ordered$freq[51:100]),sum(ordered$freq[100:nrow(ordered)]))
+  colnames(df.entry) <- c("Sample_Name","1-5","6-10","11-50","51-100","100+")
+  df.Distribution <- rbind(df.Distribution, df.entry)
+}
+
+#Combine distribution with clinical variables
+df.Distribution <- data.frame(merge(df.WashU.Tissue,df.Distribution, by="Sample_Name"))
+df.Distribution$X1.100 <- df.Distribution$X1.5+df.Distribution$X6.10+df.Distribution$X11.50+df.Distribution$X51.100
+
+#Stacked Bar Plot
+
+#Separate into survival groups and get mean of each TCR group
+df.Distribution_temp <- df.Distribution %>% 
+  group_by(Survival_Group) %>% 
+  summarize("1-5" = mean(X1.5),
+            "6-10" = mean (X6.10),
+            "11-50" = mean (X11.50),
+            "51-100" = mean (X51.100),
+            "101+" = mean (X100.))
+
+#Format ST, MT and LT groups
+ST <-data.table(t(subset(df.Distribution_temp, Survival_Group %in% c("ST"))))[2:6] %>% mutate(TCR_Group = c("1-5","6-10","11-50","51-100","100+"),
+                   Survival_Group = "ST")                                                                              
+MT <-data.table(t(subset(df.Distribution_temp, Survival_Group %in% c("MT"))))[2:6] %>% mutate(TCR_Group = c("1-5","6-10","11-50","51-100","100+"),
+                   Survival_Group = "MT")     
+
+LT <-data.table(t(subset(df.Distribution_temp, Survival_Group %in% c("LT"))))[2:6] %>% mutate(TCR_Group = c("1-5","6-10","11-50","51-100","100+"),
+                   Survival_Group = "LT")     
+
+#Combine into correct format for barplot
+df.Distribution_barplot <- rbind(ST,MT,LT)
+#Process for barplot
+#Rename
+names(df.Distribution_barplot)[names(df.Distribution_barplot) == "V1"] <- "Mean_Productive_Frequency"
+#Factor
+df.Distribution_barplot$Survival_Group <- factor(df.Distribution_barplot$Survival_Group, levels = c("LT","MT","ST"))
+#Convert to numeric
+df.Distribution_barplot$Mean_Productive_Frequency <- as.numeric(df.Distribution_barplot$Mean_Productive_Frequency)
+#Factor
+df.Distribution_barplot$TCR_Group <- factor(df.Distribution_barplot$TCR_Group, levels = c("1-5","6-10","11-50","51-100","100+"))
+
+#Create Bar Plot
+pdf(str_glue("{OUTPUT_DIR}/WashUTissue_Clonotype_Distribution_Stacked_Bar.pdf"), height = 4, width = 4)
+ggplot(df.Distribution_barplot, aes(x = Survival_Group, y = Mean_Productive_Frequency, fill = TCR_Group)) + geom_col() + xlab("Survival Group") + ylab ("Mean Productive Frequency") +theme_minimal() + scale_fill_brewer(palette = "Set3")
+dev.off()
+
+#Below are Boxplot comparisons by TCR group - not included in manuscript but used for ANOVA testing
+my_comparisons <- list(c("ST","MT"),c("ST","LT"),c("MT","LT"))
+df.Distribution$Survival_Group <- factor(df.Distribution$Survival_Group, levels = c("LT","MT","ST","PO","S"))
+
+#ANOVA testing
+compare_means(X1.5~Survival_Group, method ='anova',data = subset(df.Distribution, Survival_Group %in% c("ST","MT","LT")))
+compare_means(X6.10~Survival_Group, method ='anova',data = subset(df.Distribution, Survival_Group %in% c("ST","MT","LT")))
+compare_means(X11.50~Survival_Group, method ='anova',data = subset(df.Distribution, Survival_Group %in% c("ST","MT","LT")))
+compare_means(X51.100~Survival_Group, method ='anova',data = subset(df.Distribution, Survival_Group %in% c("ST","MT","LT")))
+compare_means(X100.~Survival_Group, method ='anova',data = subset(df.Distribution, Survival_Group %in% c("ST","MT","LT")))
+```
